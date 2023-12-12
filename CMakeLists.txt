@@ -13,5 +13,14 @@ execute_process(
         ${CMAKE_SOURCE_DIR}/compile_commands.json
 )
 
+add_library(gh4ck3r INTERFACE)
+target_include_directories(gh4ck3r INTERFACE include)
+target_compile_features(gh4ck3r INTERFACE cxx_std_17)
+set_target_properties(gh4ck3r PROPERTIES
+  VERSION ${PROJECT_VERSION}
+  SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+  DEBUG_POSTFIX d
+)
+
 enable_testing()
 add_subdirectory(test)

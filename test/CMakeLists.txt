@@ -13,3 +13,6 @@ link_libraries(gh4ck3r gtest_main)
 
 add_executable(hexdump.test hexdump.test.cc)
 gtest_discover_tests(hexdump.test)
+
+add_executable(lazygetter.test lazygetter.test.cc)
+gtest_discover_tests(lazygetter.test)

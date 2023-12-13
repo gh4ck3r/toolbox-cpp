@@ -16,3 +16,6 @@ gtest_discover_tests(hexdump.test)
 
 add_executable(lazygetter.test lazygetter.test.cc)
 gtest_discover_tests(lazygetter.test)
+
+add_executable(concat.test concat.test.cc)
+gtest_discover_tests(concat.test)

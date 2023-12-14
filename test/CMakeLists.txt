@@ -19,3 +19,6 @@ gtest_discover_tests(lazygetter.test)
 
 add_executable(concat.test concat.test.cc)
 gtest_discover_tests(concat.test)
+
+add_executable(logger.test logger.test.cc)
+gtest_discover_tests(logger.test)

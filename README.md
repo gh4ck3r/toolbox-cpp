@@ -9,6 +9,11 @@
  * can be assigned with a value prior to `GETTER()`
  * `GETTER` is gone once it has a value by any means.
 
+### Logger
+ * `std::ostream` wrapper that is capable of indentation.
+ * Indentation level can be adjusted via `indent()`, `unindent()`
+     method or manipulator like one defined in iomanip (e.g. std::hex).
+
 ## Functionality
 ### hexdump
  Dump linear buffer to `std::string`. Following forms are possible.
@@ -21,3 +26,4 @@
     * Template parameters should have `static` storage class.
     * Concatenated string_view ended with `null`.
   * `concat(std::array...)`: concatenate given `std::array`s
+

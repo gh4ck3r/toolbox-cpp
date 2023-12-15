@@ -9,6 +9,17 @@ set(INSTALL_GTEST OFF)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+if (CMAKE_CXX_COMPILER_ID STREQUAL GNU)
+add_compile_options(
+  -Wall
+  -Wextra
+  $<$<CONFIG:Release>:-Werror>
+  -pedantic
+  -g3
+  -ggdb3
+)
+endif()
+
 link_libraries(gh4ck3r gtest_main)
 
 add_executable(hexdump.test hexdump.test.cc)

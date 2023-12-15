@@ -27,3 +27,8 @@
     * Concatenated string_view ended with `null`.
   * `concat(std::array...)`: concatenate given `std::array`s
 
+### recipe
+ Function `recipe(invocable1, invocable2, ...)` returns a lambda function which
+forward given arguments to `invocable1` and forward its return to next one until
+last argument which returns final return value. It's similar to `std::range`
+from C++20 semantically.

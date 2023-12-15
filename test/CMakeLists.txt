@@ -22,3 +22,6 @@ gtest_discover_tests(concat.test)
 
 add_executable(logger.test logger.test.cc)
 gtest_discover_tests(logger.test)
+
+add_executable(recipe.test recipe.test.cc)
+gtest_discover_tests(recipe.test)

@@ -21,8 +21,8 @@ TEST(hexdump, ptr_len)
 
 TEST(hexdump, empty)
 {
-  constexpr char buf[] {};
-  EXPECT_TRUE(hexdump(buf, sizeof(buf)).empty());
+  constexpr auto buf { nullptr };
+  EXPECT_TRUE(hexdump(buf, 0).empty());
 }
 
 TEST(hexdump, empty_stdarray)
@@ -45,10 +45,11 @@ TEST(hexdump, multiline_full)
   };
 
   const auto output = [] (const void * const p) {
+    static_assert(std::is_same_v<decltype(p), const void * const>);
     std::ostringstream oss;
     oss << p
       <<  "  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f  ................\n"
-      << static_cast<decltype(p)>(static_cast<const uint8_t*>(p) + 0x10)
+      << static_cast<const void *>(static_cast<const uint8_t*>(p) + 0x10)
       <<  "  0f 0e 0d 0c 0b 0a 09 08 07 06 05 04 03 02 01 00  ................\n";
     return oss.str();
   }(buf);
@@ -67,7 +68,7 @@ TEST(hexdump, multiline_partial)
     std::ostringstream oss;
     oss << p
       <<  "  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f  ................\n"
-      << static_cast<decltype(p)>(static_cast<const uint8_t*>(p) + 0x10)
+      << static_cast<const void *>(static_cast<const uint8_t*>(p) + 0x10)
       <<  "  0f 0e 0d 0c 0b 0a 09 08 07 06                    ..........\n";
     return oss.str();
   }(buf);
@@ -173,7 +174,7 @@ TEST(hexdump, vector16)
     std::ostringstream oss;
     oss << p
       <<  "  0000 0001 0002 0003 0004 0005 0006 0007  ........\n"
-      << static_cast<decltype(p)>(static_cast<const uint8_t*>(p) + 0x10)
+      << static_cast<const void *>(static_cast<const uint8_t*>(p) + 0x10)
       <<  "  0008 0009 000a 000b 000c 000d 000e 000f  ........\n";
     return oss.str();
   }(v.data());

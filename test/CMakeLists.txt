@@ -1,3 +1,4 @@
+cmake_minimum_required(VERSION 3.20)
 include(GoogleTest)
 include(FetchContent)
 FetchContent_Declare(
@@ -22,17 +23,14 @@ endif()
 
 link_libraries(gh4ck3r gtest_main)
 
-add_executable(hexdump.test hexdump.test.cc)
-gtest_discover_tests(hexdump.test)
+function(add_unittest TestMainSrc)
+  cmake_path(GET TestMainSrc STEM LAST_ONLY TESTNAME)
+  add_executable(${TESTNAME} ${TestMainSrc} ${ARGN})
+  gtest_discover_tests(${TESTNAME})
+endfunction()
 
-add_executable(lazygetter.test lazygetter.test.cc)
-gtest_discover_tests(lazygetter.test)
-
-add_executable(concat.test concat.test.cc)
-gtest_discover_tests(concat.test)
-
-add_executable(logger.test logger.test.cc)
-gtest_discover_tests(logger.test)
-
-add_executable(recipe.test recipe.test.cc)
-gtest_discover_tests(recipe.test)
+add_unittest(hexdump.test.cc)
+add_unittest(lazygetter.test.cc)
+add_unittest(concat.test.cc)
+add_unittest(logger.test.cc)
+add_unittest(recipe.test.cc)

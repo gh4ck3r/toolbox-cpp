@@ -2,7 +2,7 @@
 #include <ostream>
 #include <streambuf>
 
-namespace gh4ck3r { 
+namespace gh4ck3r {
 
 class indent_ostreambuf : public std::streambuf {
  public:
@@ -14,10 +14,10 @@ class indent_ostreambuf : public std::streambuf {
   std::streambuf* sbuf;
   bool            need_prefix;
 
-  inline int sync() { return sbuf->pubsync(); }
+  inline int sync() override { return sbuf->pubsync(); }
 
-  int overflow(int c) {
-    if (c != std::char_traits<char>::eof()) {
+  int overflow(int c) override {
+    if (c != traits_type::eof()) {
       if (need_prefix && nindent) {
         const std::string prefix(nindent, ' ');
         if (const auto nput = sbuf->sputn(prefix.data(), nindent);
@@ -53,7 +53,7 @@ class indent_ostream : private virtual indent_ostreambuf, public std::ostream {
 
   template<bool RIGHT>
   class do_indent {
-  public:
+   public:
     do_indent(const size_t nlevel = 1) : nlevel_(nlevel) {}
     std::ostream &operator()(std::ostream &os) const {
       if (auto ios = dynamic_cast<indent_ostream*>(&os); ios) {
@@ -66,7 +66,7 @@ class indent_ostream : private virtual indent_ostreambuf, public std::ostream {
       return os;
     }
 
-  private:
+   private:
     size_t nlevel_;
     friend inline std::ostream &operator<<(std::ostream &os, do_indent d) {
       return d(os);

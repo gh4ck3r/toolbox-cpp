@@ -13,14 +13,9 @@ if(NOT GTest_FOUND)
 endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL GNU)
-add_compile_options(
-  -Wall
-  -Wextra
-  $<$<CONFIG:Release>:-Werror>
-  -pedantic
-  -g3
-  -ggdb3
-)
+  string(APPEND CMAKE_CXX_FLAGS " -pipe -pedantic -Wall")
+  string(APPEND CMAKE_CXX_FLAGS_DEBUG " -ggdb3")
+  string(APPEND CMAKE_CXX_FLAGS_RELEASE " -Werror")
 endif()
 
 link_libraries(gh4ck3r GTest::gtest_main)

@@ -6,6 +6,8 @@ project(gh4ck3r-snippets
   LANGUAGES CXX
 )
 
+include(GNUInstallDirs)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 execute_process(
   COMMAND ${CMAKE_COMMAND} -E create_symlink

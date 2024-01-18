@@ -1,0 +1,60 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "common",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "build/${presetName}",
+      "cacheVariables": {},
+      "environment": {}
+    },
+    {
+      "inherits": "common",
+      "name": "dev-env",
+      "hidden": true,
+      "warnings": {
+        "dev": false,
+        "deprecated": true,
+        "uninitialized": true,
+        "unusedCli": true,
+        "systemVars": true
+      },
+      "errors": {
+        "dev": false,
+        "deprecated": true
+      },
+      "debug": {
+        "output": true,
+        "tryCompile": true,
+        "find": true
+      }
+    },
+    {
+      "inherits": "common",
+      "name": "dev",
+      "displayName": "Development",
+      "description": "Configuraion for Development"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "jobs": 0
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": {"outputOnFailure": true},
+      "execution": {"noTestAction": "error", "stopOnFailure": true}
+    }
+  ]
+}

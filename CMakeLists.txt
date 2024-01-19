@@ -10,6 +10,9 @@ list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 include(compiledb)
 
+# use package from host first
+set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
+
 add_library(gh4ck3r INTERFACE)
 target_include_directories(gh4ck3r INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

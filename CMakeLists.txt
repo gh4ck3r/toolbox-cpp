@@ -6,6 +6,8 @@ project(gh4ck3r-snippets
   LANGUAGES CXX
 )
 
+option(GH4CK3R_USE_HTTP "use http server/client; It depends other projects")
+
 list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 include(compiledb)
@@ -17,6 +19,20 @@ add_library(gh4ck3r INTERFACE)
 target_include_directories(gh4ck3r INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+
+if (GH4CK3R_USE_HTTP)
+  find_package(httplib REQUIRED)
+else()
+  find_package(httplib QUIET)
+endif()
+
+if (TARGET httplib::httplib)
+target_include_directories(gh4ck3r INTERFACE
+  $<$<BOOL:${httplib_FOUND}>:${HTTPLIB_INCLUDE_DIR}>
+)
+target_link_libraries(gh4ck3r INTERFACE httplib::httplib)
+endif()
+
 target_compile_features(gh4ck3r INTERFACE cxx_std_17)
 set_target_properties(gh4ck3r PROPERTIES
   VERSION ${PROJECT_VERSION}

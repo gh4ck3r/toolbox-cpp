@@ -24,3 +24,7 @@ add_unittest(logger.test.cc)
 add_unittest(recipe.test.cc)
 add_unittest(base64.test.cc)
 add_unittest(defer.test.cc)
+
+if (TARGET httplib::httplib)
+  add_unittest(http.test.cc)
+endif()

@@ -6,14 +6,9 @@ project(gh4ck3r-snippets
   LANGUAGES CXX
 )
 
-include(GNUInstallDirs)
+list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-execute_process(
-  COMMAND ${CMAKE_COMMAND} -E create_symlink
-    ${CMAKE_BINARY_DIR}/compile_commands.json
-    ${CMAKE_SOURCE_DIR}/compile_commands.json
-)
+include(compiledb)
 
 add_library(gh4ck3r INTERFACE)
 target_include_directories(gh4ck3r INTERFACE
@@ -26,6 +21,7 @@ set_target_properties(gh4ck3r PROPERTIES
   DEBUG_POSTFIX d
 )
 
+include(GNUInstallDirs)
 install(TARGETS gh4ck3r)
 install(
   DIRECTORY include/

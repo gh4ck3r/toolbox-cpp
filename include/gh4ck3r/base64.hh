@@ -3,6 +3,7 @@
 #include <sstream>
 #include <string_view>
 #include <vector>
+#include <cstdint>
 
 namespace gh4ck3r::base64 {
 

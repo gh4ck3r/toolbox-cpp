@@ -15,7 +15,17 @@ include(compiledb)
 # use package from host first
 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
 
-add_library(gh4ck3r INTERFACE)
+add_library(gh4ck3r INTERFACE
+  include/gh4ck3r/base64.hh
+  include/gh4ck3r/concat.hh
+  include/gh4ck3r/defer.hh
+  include/gh4ck3r/hexdump.hh
+  include/gh4ck3r/lazygetter.hh
+  include/gh4ck3r/logger.hh
+  include/gh4ck3r/recipe.hh
+  )
+
+target_compile_features(gh4ck3r INTERFACE cxx_std_17)
 
 target_include_directories(gh4ck3r INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -36,19 +46,18 @@ if (TARGET httplib::httplib)
   target_link_libraries(gh4ck3r INTERFACE httplib::httplib)
 endif()
 
-target_compile_features(gh4ck3r INTERFACE cxx_std_17)
+get_target_property(PUBLIC_HEADER_FILES gh4ck3r SOURCES)
 set_target_properties(gh4ck3r PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+  PUBLIC_HEADER "${PUBLIC_HEADER_FILES}"
   DEBUG_POSTFIX d
   )
 
 include(GNUInstallDirs)
-install(TARGETS gh4ck3r)
-install(
-  DIRECTORY include/
-  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-)
+install(TARGETS gh4ck3r
+  PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gh4ck3r
+  )
 
 enable_testing()
 add_subdirectory(test)

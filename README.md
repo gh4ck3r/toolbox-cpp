@@ -1,4 +1,4 @@
-# cpp-snippets
+# toolbox-cpp
 
 ## namespace
  Namespace `gh4ck3r` is applied to entire snippets.

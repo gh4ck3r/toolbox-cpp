@@ -15,7 +15,8 @@ include(compiledb)
 # use package from host first
 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
 
-add_library(gh4ck3r INTERFACE
+add_library(gh4ck3r INTERFACE)
+set_property(TARGET gh4ck3r APPEND PROPERTY PUBLIC_HEADER
   include/gh4ck3r/base64.hh
   include/gh4ck3r/concat.hh
   include/gh4ck3r/defer.hh
@@ -48,11 +49,9 @@ if (TARGET httplib::httplib)
   target_link_libraries(gh4ck3r INTERFACE httplib::httplib)
 endif()
 
-get_target_property(PUBLIC_HEADER_FILES gh4ck3r SOURCES)
 set_target_properties(gh4ck3r PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
-  PUBLIC_HEADER "${PUBLIC_HEADER_FILES}"
   DEBUG_POSTFIX d
   )
 

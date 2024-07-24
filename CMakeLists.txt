@@ -23,6 +23,7 @@ add_library(gh4ck3r INTERFACE
   include/gh4ck3r/lazygetter.hh
   include/gh4ck3r/logger.hh
   include/gh4ck3r/recipe.hh
+  include/gh4ck3r/typemap.hh
   )
 
 target_compile_features(gh4ck3r INTERFACE cxx_std_17)

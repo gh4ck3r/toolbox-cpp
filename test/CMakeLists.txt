@@ -2,9 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 find_package(GTest)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL GNU)
-  string(APPEND CMAKE_CXX_FLAGS " -pipe -pedantic -Wall")
-  string(APPEND CMAKE_CXX_FLAGS_DEBUG " -ggdb3")
-  string(APPEND CMAKE_CXX_FLAGS_RELEASE " -Werror")
+  string(APPEND CMAKE_CXX_FLAGS " -pipe -pedantic -Wall -O -ggdb")
+  string(APPEND CMAKE_CXX_FLAGS_DEBUG " -O0 -Og -ggdb3")
+  string(APPEND CMAKE_CXX_FLAGS_RELEASE " -O2 -Werror")
 endif()
 
 link_libraries(gh4ck3r GTest::gtest_main)

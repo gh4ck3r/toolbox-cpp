@@ -23,7 +23,7 @@ constexpr bool is_typedef_v = std::is_same_v<
 template <typename...TDEFS>
 struct declare_t : TDEFS... {
   static_assert((is_typedef_v<TDEFS> && ...),
-      "should be defiend with typedef_t");
+      "should be defined with typedef_t");
 
   using TDEFS::typefor...;
   using first_t = std::tuple_element_t<0, std::tuple<TDEFS...>>;

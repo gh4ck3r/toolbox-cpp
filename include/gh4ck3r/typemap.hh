@@ -16,9 +16,9 @@ struct typedef_t {
 };
 
 template <typename VALUE>
-constexpr bool is_typedef_v = std::is_same_v<
-    VALUE,
-    typedef_t<VALUE::key, typename VALUE::mapped_type>>;
+constexpr bool is_typedef_v = std::is_base_of_v<
+    typedef_t<VALUE::key, typename VALUE::mapped_type>,
+    VALUE>;
 
 template <typename...TDEFS>
 struct declare_t : TDEFS... {

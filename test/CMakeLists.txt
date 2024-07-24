@@ -27,6 +27,7 @@ add_unittest(defer.test.cc)
 add_unittest(type_traits.test.cc)
 add_unittest(typemap.test.cc)
 add_unittest(file.test.cc)
+add_unittest(singleton.test.cc)
 
 if (TARGET httplib::httplib)
   add_unittest(http.test.cc)

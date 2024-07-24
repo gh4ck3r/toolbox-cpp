@@ -26,6 +26,7 @@ set_property(TARGET gh4ck3r APPEND PROPERTY PUBLIC_HEADER
   include/gh4ck3r/recipe.hh
   include/gh4ck3r/type_traits.hh
   include/gh4ck3r/typemap.hh
+  include/gh4ck3r/singleton.hh
   )
 
 target_compile_features(gh4ck3r INTERFACE cxx_std_17)

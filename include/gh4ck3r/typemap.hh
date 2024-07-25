@@ -15,10 +15,10 @@ struct typedef_t {
   static typedef_t typefor(key_t<KEY>);
 };
 
-template <typename VALUE>
+template <typename TYPEDEF>
 constexpr bool is_typedef_v = std::is_base_of_v<
-    typedef_t<VALUE::key, typename VALUE::mapped_type>,
-    VALUE>;
+    typedef_t<TYPEDEF::key, typename TYPEDEF::mapped_type>,
+    TYPEDEF>;
 
 template <typename...TDEFS>
 struct declare_t : TDEFS... {

@@ -1,21 +1,16 @@
 #include "gh4ck3r/typemap.hh"
 #include <gtest/gtest.h>
 
-using gh4ck3r::typemap::typedef_t;
-using gh4ck3r::typemap::declare_t;
+namespace gh4ck3r::metatype::typemap {
 
 TEST(typemapTest, typedef_by_signed)
 {
-  using gh4ck3r::typemap::is_typedef_v;
-
   static_assert(is_typedef_v<typedef_t<-1, std::string>>);
   static_assert(is_typedef_v<typedef_t<1, float>>);
 }
 
 TEST(typemapTest, typedef_by_unsigned)
 {
-  using gh4ck3r::typemap::is_typedef_v;
-
   static_assert(is_typedef_v<typedef_t<1u, int>>);
   static_assert(is_typedef_v<typedef_t<3u, long>>);
 }
@@ -24,7 +19,6 @@ TEST(typemapTest, typedef_by_enum)
 {
   enum color { red, green, blue };
 
-  using gh4ck3r::typemap::is_typedef_v;
   static_assert(is_typedef_v<typedef_t<red, int>>);
   static_assert(is_typedef_v<typedef_t<green, float>>);
   static_assert(is_typedef_v<typedef_t<blue, std::string>>);
@@ -39,7 +33,6 @@ TEST(typemapTest, typedef_inherited)
     static_assert(true, "add constraints like this!");
   };
 
-  using gh4ck3r::typemap::is_typedef_v;
   static_assert(is_typedef_v<inherited_typedef1>);
   static_assert(is_typedef_v<inherited_typedef2>);
 }
@@ -56,3 +49,5 @@ TEST(typemapTest, declare)
   static_assert(std::is_same_v<mytypes::at<3u>, long>);
   static_assert(std::is_same_v<mytypes::at<5u>, std::string>);
 }
+
+} // namespace gh4ck3r::metatype::typemap

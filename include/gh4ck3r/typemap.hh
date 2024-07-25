@@ -2,7 +2,7 @@
 #include <tuple>
 #include <type_traits>
 
-namespace gh4ck3r::typemap {
+namespace gh4ck3r::metatype::typemap {
 
 template <auto KEY>
 using key_t = std::integral_constant<decltype(KEY), KEY>;
@@ -32,4 +32,4 @@ struct declare_t : TDEFS... {
   using at = typename decltype(typefor(key_t<KEY>{}))::mapped_type;
 };
 
-}  // namespace gh4ck3r::typemap
+}  // namespace gh4ck3r::metatype::typemap

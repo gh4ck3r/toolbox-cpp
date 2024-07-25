@@ -28,7 +28,20 @@ TEST(typemapTest, typedef_by_enum)
   static_assert(is_typedef_v<typedef_t<red, int>>);
   static_assert(is_typedef_v<typedef_t<green, float>>);
   static_assert(is_typedef_v<typedef_t<blue, std::string>>);
+}
 
+TEST(typemapTest, typedef_inherited)
+{
+  struct inherited_typedef1 : typedef_t<1, std::string> {
+    static_assert(true, "add constraints like this!");
+  };
+  struct inherited_typedef2 : typedef_t<2, int> {
+    static_assert(true, "add constraints like this!");
+  };
+
+  using gh4ck3r::typemap::is_typedef_v;
+  static_assert(is_typedef_v<inherited_typedef1>);
+  static_assert(is_typedef_v<inherited_typedef2>);
 }
 
 TEST(typemapTest, declare)

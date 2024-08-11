@@ -50,6 +50,14 @@ if (TARGET httplib::httplib)
   target_link_libraries(gh4ck3r INTERFACE httplib::httplib)
 endif()
 
+find_package(OpenSSL REQUIRED)
+if(OpenSSL_FOUND)
+  set_property(TARGET gh4ck3r APPEND PROPERTY PUBLIC_HEADER
+    include/gh4ck3r/crypto.hh
+    )
+  link_libraries(gh4ck3r OpenSSL::Crypto)
+endif()
+
 set_target_properties(gh4ck3r PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}

@@ -32,3 +32,8 @@ add_unittest(singleton.test.cc)
 if (TARGET httplib::httplib)
   add_unittest(http.test.cc)
 endif()
+
+get_target_property(PUBLIC_HEADERS gh4ck3r PUBLIC_HEADER)
+if(include/gh4ck3r/crypto.hh IN_LIST PUBLIC_HEADERS)
+  add_unittest(crypto.test.cc)
+endif()

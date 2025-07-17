@@ -4,14 +4,14 @@
 #include <dlfcn.h>
 #include <gnu/lib-names.h>
 
-using gh4ck3r::Singleton;
+using gh4ck3r::SharedSingleton;
 
-TEST(Singleton, dl)
+TEST(SharedSingleton, dl)
 {
   constexpr auto dlopen = [] { return ::dlopen(LIBM_SO, RTLD_LAZY); };
   constexpr auto dlclose = [] (auto *p) { if (::dlclose(p)) FAIL(); };
 
-  using libm = Singleton<void, dlopen, dlclose>;
+  using libm = SharedSingleton<void, dlopen, dlclose>;
 
   EXPECT_EQ(0, libm::use_count());
   {

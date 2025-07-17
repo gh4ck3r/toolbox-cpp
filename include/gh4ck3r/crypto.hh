@@ -51,7 +51,7 @@ struct ERR : std::runtime_error {
 #if OPENSSL_VERSION_NUMBER >= 0x030000000 // 3.0.0
 inline namespace v3 {
 
-using LIB_CTX = Singleton<OSSL_LIB_CTX,
+using LIB_CTX = SharedSingleton<OSSL_LIB_CTX,
       OSSL_LIB_CTX_get0_global_default,
       OSSL_LIB_CTX_free>;
 

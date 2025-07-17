@@ -29,7 +29,7 @@ set_property(TARGET gh4ck3r APPEND PROPERTY PUBLIC_HEADER
   include/gh4ck3r/singleton.hh
   )
 
-target_compile_features(gh4ck3r INTERFACE cxx_std_17)
+target_compile_features(gh4ck3r INTERFACE cxx_std_20)
 
 target_include_directories(gh4ck3r INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

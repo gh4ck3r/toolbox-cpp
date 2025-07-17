@@ -14,6 +14,14 @@
  * Indentation level can be adjusted via `indent()`, `unindent()`
      method or manipulator like one defined in iomanip (e.g. std::hex).
 
+### Singleton
+### SharedSingleton<T>
+ `SharedSingleton<T>` is a singleton based on `std::shared_ptr<T>`. it
+ constructs instance of T on first construction of `SharedSingle<T>` instance.
+ Once the instance is constructed it can be shared as `std::shared_ptr<T>` do
+ and destructed once the reference count decreased to 0. Even though the
+ instance is gone, making next first instance makes new `T` instance.
+
 ## Functionality
 ### hexdump
  Dump linear buffer to `std::string`. Following forms are possible.

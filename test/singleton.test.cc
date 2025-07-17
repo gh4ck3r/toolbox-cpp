@@ -4,7 +4,7 @@
 #include <dlfcn.h>
 #include <gnu/lib-names.h>
 
-using gh4ck3r::SharedSingleton;
+using namespace gh4ck3r::singleton;
 
 TEST(SharedSingleton, dl)
 {
@@ -31,4 +31,54 @@ TEST(SharedSingleton, dl)
     EXPECT_EQ(1, dlhandle1.use_count());
   }
   EXPECT_EQ(0, libm::use_count());
+}
+
+class SingletonTraitsTest: public ::testing::Test {
+ protected:
+  class Descendant : SingletonTraits {};
+};
+
+TEST_F(SingletonTraitsTest, prohibit_ctor)
+{
+  static_assert(not std::is_constructible_v<SingletonTraits>);
+}
+
+TEST_F(SingletonTraitsTest, prohibit_copy)
+{
+  static_assert(not std::is_copy_constructible_v<Descendant>);
+  static_assert(not std::is_copy_assignable_v<Descendant>);
+}
+
+TEST_F(SingletonTraitsTest, prohibit_move)
+{
+  class Foo : SingletonTraits {};
+  static_assert(not std::is_move_constructible_v<Foo>);
+  static_assert(not std::is_move_assignable_v<Foo>);
+}
+
+class StaticSingletonTest: public ::testing::Test {
+ protected:
+  class SomeType {};
+};
+
+TEST_F(StaticSingletonTest, prohibit_ctor)
+{
+  static_assert(not std::is_constructible_v<StaticSingleton<SomeType>>);
+}
+
+TEST_F(StaticSingletonTest, prohibit_copy)
+{
+  static_assert(not std::is_copy_constructible_v<StaticSingleton<SomeType>>);
+  static_assert(not std::is_copy_assignable_v<StaticSingleton<SomeType>>);
+}
+
+TEST_F(StaticSingletonTest, prohibit_move)
+{
+  static_assert(not std::is_move_constructible_v<StaticSingleton<SomeType>>);
+  static_assert(not std::is_move_assignable_v<StaticSingleton<SomeType>>);
+}
+
+TEST_F(StaticSingletonTest, prohibit_inheritance)
+{
+  static_assert(std::is_final_v<StaticSingleton<SomeType>>);
 }

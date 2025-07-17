@@ -54,8 +54,29 @@ class SharedSingleton : public std::shared_ptr<T> {
 
   static inline auto use_count() { return weak_instance.use_count(); }
 };
+
+class SingletonTraits {
+ protected:
+  SingletonTraits()  = default;
+  ~SingletonTraits() = default;
+  SingletonTraits(const SingletonTraits&)             = delete;
+  SingletonTraits(      SingletonTraits&&)            = delete;
+  SingletonTraits& operator=(const SingletonTraits&)  = delete;
+  SingletonTraits& operator=(      SingletonTraits&&) = delete;
+};
+
+template <typename T>
+struct StaticSingleton final : T, private SingletonTraits {
+  StaticSingleton() = delete;
+  static inline T &instance() {
+    static StaticSingleton s {};
+    return s;
+  }
+};
+
 } // namespace singleton
 
 using singleton::SharedSingleton;
+using singleton::StaticSingleton;
 
 } // namespace gh4ck3r

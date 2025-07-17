@@ -22,6 +22,10 @@
  and destructed once the reference count decreased to 0. Even though the
  instance is gone, making next first instance makes new `T` instance.
 
+### StaticSingleton<T>
+ `StaticSingle<T>` is a template class which makes given `T` into typical
+ singleton instance.
+
 ## Functionality
 ### hexdump
  Dump linear buffer to `std::string`. Following forms are possible.

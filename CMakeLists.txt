@@ -4,7 +4,7 @@ project(toolbox-cpp
   DESCRIPTION "collection of snippets for C++17"
   HOMEPAGE_URL https://github.com/gh4ck3r/toolbox-cpp
   LANGUAGES CXX
-  )
+)
 
 option(GH4CK3R_USE_HTTP "use http server/client; It depends other projects")
 
@@ -27,14 +27,14 @@ set_property(TARGET gh4ck3r APPEND PROPERTY PUBLIC_HEADER
   include/gh4ck3r/type_traits.hh
   include/gh4ck3r/typemap.hh
   include/gh4ck3r/singleton.hh
-  )
+)
 
 target_compile_features(gh4ck3r INTERFACE cxx_std_20)
 
 target_include_directories(gh4ck3r INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-  )
+)
 
 if(GH4CK3R_USE_HTTP)
   find_package(httplib REQUIRED)
@@ -42,11 +42,11 @@ else()
   find_package(httplib QUIET)
 endif()
 
-if (TARGET httplib::httplib)
+if(TARGET httplib::httplib)
   target_include_directories(gh4ck3r
     INTERFACE
       $<$<BOOL:${httplib_FOUND}>:${HTTPLIB_INCLUDE_DIR}>
-    )
+  )
   target_link_libraries(gh4ck3r INTERFACE httplib::httplib)
 endif()
 
@@ -54,7 +54,7 @@ find_package(OpenSSL REQUIRED)
 if(OpenSSL_FOUND)
   set_property(TARGET gh4ck3r APPEND PROPERTY PUBLIC_HEADER
     include/gh4ck3r/crypto.hh
-    )
+  )
   link_libraries(gh4ck3r OpenSSL::Crypto)
 endif()
 
@@ -62,12 +62,12 @@ set_target_properties(gh4ck3r PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
   DEBUG_POSTFIX d
-  )
+)
 
 include(GNUInstallDirs)
 install(TARGETS gh4ck3r
   PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gh4ck3r
-  )
+)
 
 enable_testing()
 add_subdirectory(test)

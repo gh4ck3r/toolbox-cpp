@@ -7,7 +7,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
   string(APPEND CMAKE_CXX_FLAGS_RELEASE " -O2 -Werror")
 endif()
 
-link_libraries(gh4ck3r GTest::gtest_main)
+link_libraries(gh4ck3r GTest::gtest_main mnl)
 
 include(GoogleTest)
 function(add_unittest TestMainSrc)
@@ -29,6 +29,7 @@ add_unittest(typemap.test.cc)
 add_unittest(file.test.cc)
 add_unittest(singleton.test.cc)
 add_unittest(network.test.cc)
+add_unittest(mnl.test.cc)
 
 if(TARGET httplib::httplib)
   add_unittest(http.test.cc)

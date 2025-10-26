@@ -37,6 +37,9 @@ enum class Family {
 };
 
 
+template <typename F, typename EXTHDR>
+concept header_initiator_t = std::is_invocable_v<F, nlmsghdr&, EXTHDR&>;
+
 template <Family BUS>
 class Socket {
  public:
@@ -72,25 +75,25 @@ class Socket {
   template <size_t N>
   using buf_t = std::array<uint8_t, N>;
 
-  template <uint16_t TYPE, uint16_t FLAGS, size_t N>
-  auto netlink_header(buf_t<N> &buf) {
-    static_assert(N > sizeof(nlmsghdr));
+  template <typename EXTHDR, header_initiator_t<EXTHDR> CALLBACK >
+  msgid_t sendmsg(CALLBACK callback) {
+    buf_t<BUFSIZ/*MNL_SOCKET_BUFFER_SIZE*/> buf;
 
-    nlmsghdr * const hdr = mnl_nlmsg_put_header(buf.data());
-    hdr->nlmsg_type = TYPE;
-    hdr->nlmsg_flags = FLAGS;
-    hdr->nlmsg_seq = seq_++;
+    nlmsghdr * const nlh = mnl_nlmsg_put_header(buf.data());
+    callback(*nlh, *reinterpret_cast<std::add_pointer_t<EXTHDR>>(
+      mnl_nlmsg_put_extra_header(nlh, sizeof(EXTHDR))));
 
+    nlh->nlmsg_seq = seq_++;
 
-    return hdr;
-  }
-  template <typename EXTHDR>
-  msgid_t sendmsg(auto callback) {
-    buf_t<MNL_SOCKET_BUFFER_SIZE> buf;
+    for (ssize_t nsent, nleft = nlh->nlmsg_len; nleft; nleft -= nsent) {
+      nsent = mnl_socket_sendto(socket_, nlh, nlh->nlmsg_len);
+      if (nsent == -1) [[unlikely]] throw std::system_error {
+        errno,
+        std::system_category(),
+        "failed to send netlink msg"};
+    }
 
-    nlmsghdr * const nlhdr = mnl_nlmsg_put_header(buf.data());
-    callback(*nlhdr, *reinterpret_cast<EXTHDR*>(
-      mnl_nlmsg_put_extra_header(nlh, sizeof(struct nfgenmsg))));
+    return nlh->nlmsg_seq;
   }
 
  private:
@@ -114,13 +117,6 @@ class Tuple {
 
 } // namespace tuple
 
-enum class Subsystem : uint8_t {
-  CTNETLINK_EXP     = NFNL_SUBSYS_CTNETLINK_EXP,
-  CTNETLINK         = NFNL_SUBSYS_CTNETLINK,
-  CTNETLINK_TIMEOUT = NFNL_SUBSYS_CTNETLINK_TIMEOUT,
-  CTHELPER          = NFNL_SUBSYS_CTHELPER,
-};
-
 class Conntrack : public Netfilter {
  public:
   inline void bind(const nfnetlink_groups groups,
@@ -128,43 +124,23 @@ class Conntrack : public Netfilter {
     Netfilter::bind(groups, pid);
   }
 
-  using enum Subsystem;
   inline auto list(const uint8_t domain = AF_INET) {
-    return sendmsg<
-      CTNETLINK,
-      IPCTNL_MSG_CT_GET,
-      NLM_F_REQUEST|NLM_F_DUMP>({
-        .nfgen_family = domain,
-        .version = NFNETLINK_V0,
-        .res_id = 0,
+    return sendmsg<nfgenmsg>([&] (auto &nlhdr, auto &exthdr) {
+      nlhdr.nlmsg_type = (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_GET;
+      nlhdr.nlmsg_flags = NLM_F_REQUEST|NLM_F_DUMP;
+
+      exthdr.nfgen_family = domain;
+      exthdr.version = NFNETLINK_V0;
+      exthdr.res_id = 0;
     });
   }
 
   auto recvmsg(const msgid_t id) {
-    buf_t<MNL_SOCKET_DUMP_SIZE> buf; // XXX
-		auto sz = mnl_socket_recvfrom(socket(), buf.data(), buf.size());
-  }
+    buf_t<MNL_SOCKET_DUMP_SIZE/*MNL_SOCKET_BUFFER_SIZE*/> buf;
 
- protected:
-  template <Subsystem SUBSYS, cntl_msg_types MSG, uint16_t FLAGS>
-  msgid_t sendmsg(const nfgenmsg hdr) {
-    buf_t<MNL_SOCKET_DUMP_SIZE> sndbuf;
-    constexpr auto subsys =
-      static_cast<std::underlying_type_t<Subsystem>>(SUBSYS);
-    auto nlh = netlink_header<(subsys << 8) | MSG, FLAGS>(sndbuf);
-
-    *reinterpret_cast<nfgenmsg*>(
-      mnl_nlmsg_put_extra_header(nlh, sizeof(struct nfgenmsg))) = hdr;
-
-    for (ssize_t nsent, nleft = nlh->nlmsg_len; nleft; nleft -= nsent) {
-      nsent = mnl_socket_sendto(socket(), nlh, nlh->nlmsg_len);
-      if (nsent == -1) [[unlikely]] throw std::system_error {
-        errno,
-        std::system_category(),
-        "failed to send netlink msg"};
-    }
-
-    return nlh->nlmsg_seq;
+		if (auto sz = mnl_socket_recvfrom(socket(), buf.data(), buf.size()); sz < 0)
+      [[unlikely]] throw std::system_error {errno, std::system_category(),
+        "failed to recvfrom netlink socket"};
   }
 };
 
@@ -174,7 +150,6 @@ using netfilter::conntrack::Conntrack;
 
 } // namespace netlink
 
-
 TEST(netlink, socket)
 {
   netlink::Conntrack ct{};
@@ -183,4 +158,5 @@ TEST(netlink, socket)
   const auto id = ct.list(AF_INET);
 
   ct.recvmsg(id);
+
 }

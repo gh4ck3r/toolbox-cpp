@@ -1,13 +1,22 @@
 #include <array>
-#include <iterator>
-#include <map>
 #include <random>
 #include <system_error>
 #include <type_traits>
+#include <utility>
 #include <vector>
-#include <libmnl/libmnl.h>
+#include <linux/netlink.h>
 #include <linux/netfilter/nfnetlink_conntrack.h>
+#include <libmnl/libmnl.h>
 #include <gtest/gtest.h>
+
+void print(const nlmsghdr * const hdr)
+{
+	std::clog << "nlmsg_len  : " << hdr->nlmsg_len << std::endl;
+  std::clog << "nlmsg_type : " << hdr->nlmsg_type << std::endl;
+  std::clog << "nlmsg_flags: " << hdr->nlmsg_flags << std::endl;
+  std::clog << "nlmsg_seq  : " << hdr->nlmsg_seq << std::endl;
+  std::clog << "nlmsg_pid  : " << hdr->nlmsg_pid << std::endl;
+}
 
 namespace netlink {
 
@@ -39,6 +48,7 @@ enum class Family {
 
 template <typename F, typename EXTHDR>
 concept header_initiator_t = std::is_invocable_v<F, nlmsghdr&, EXTHDR&>;
+  using buf_t = std::vector<uint8_t>;
 
 template <Family BUS>
 class Socket {
@@ -72,28 +82,44 @@ class Socket {
  protected:
   const auto socket() const { return socket_; }
   using msgid_t = uint32_t;
-  template <size_t N>
-  using buf_t = std::array<uint8_t, N>;
 
-  template <typename EXTHDR, header_initiator_t<EXTHDR> CALLBACK >
-  msgid_t sendmsg(CALLBACK callback) {
-    buf_t<BUFSIZ/*MNL_SOCKET_BUFFER_SIZE*/> buf;
+  template <typename EXTHDR, header_initiator_t<EXTHDR> CALLBACK>
+  msgid_t send(CALLBACK callback) {
+    buf_t buf(MNL_SOCKET_BUFFER_SIZE, 0);
 
-    nlmsghdr * const nlh = mnl_nlmsg_put_header(buf.data());
+    auto const nlh = mnl_nlmsg_put_header(buf.data());
     callback(*nlh, *reinterpret_cast<std::add_pointer_t<EXTHDR>>(
       mnl_nlmsg_put_extra_header(nlh, sizeof(EXTHDR))));
 
     nlh->nlmsg_seq = seq_++;
 
-    for (ssize_t nsent, nleft = nlh->nlmsg_len; nleft; nleft -= nsent) {
-      nsent = mnl_socket_sendto(socket_, nlh, nlh->nlmsg_len);
+    for (ssize_t nsent = 0, nleft = nlh->nlmsg_len; nleft; nleft -= nsent) {
+      nsent = mnl_socket_sendto(socket_, nlh + nsent, nleft);
       if (nsent == -1) [[unlikely]] throw std::system_error {
         errno,
         std::system_category(),
         "failed to send netlink msg"};
     }
-
     return nlh->nlmsg_seq;
+  }
+
+  auto recv() {
+    buf_t buf (MNL_SOCKET_BUFFER_SIZE, 0);
+
+    auto nrecv = mnl_socket_recvfrom(socket(), buf.data(), buf.size());
+		if (nrecv == -1 && errno == ENOSPC) [[unlikely]] {
+      buf.resize(MNL_SOCKET_DUMP_SIZE);
+      nrecv = mnl_socket_recvfrom(
+          socket(),
+          &buf.at(MNL_SOCKET_BUFFER_SIZE),
+          MNL_SOCKET_DUMP_SIZE - MNL_SOCKET_BUFFER_SIZE);
+    }
+
+    if (nrecv != -1) [[likely]] buf.resize(nrecv);
+    else throw std::system_error { errno, std::system_category(),
+        "failed to recvfrom netlink socket"};
+
+    return buf;
   }
 
  private:
@@ -111,8 +137,146 @@ template <typename T>
 concept tuple_enum_t = std::is_enum_v<T>;
 
 template <tuple_enum_t E, E ATTR>
+struct AttrTraits {
+  using type = void;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_UNSPEC;
+  static constexpr std::string_view name {"Unknown"};
+};
+
+template <tuple_enum_t E, size_t...I>
+constexpr auto __attribute_types(std::index_sequence<I...>) {
+  return std::array {
+    AttrTraits<E, static_cast<E>(I)>::type_index...
+  };
+}
+
+template <tuple_enum_t E, size_t...I>
+constexpr auto __attribute_names(std::index_sequence<I...>) {
+  return std::array {
+    AttrTraits<E, static_cast<E>(I)>::name...
+  };
+}
+
+template <tuple_enum_t E>
+struct TupleTraits {
+  static constexpr auto max_index = 0;
+};
+
+template <tuple_enum_t E = ctattr_type>
 class Tuple {
-  std::array<nlattr* ,CTA_MAX + 1> buf_;
+  static constexpr auto max_index = TupleTraits<E>::max_index;
+  static constexpr auto attr_data_types {
+    __attribute_types<E>(std::make_index_sequence<max_index>{})
+  };
+  static constexpr mnl_attr_data_type get_attr_type(const E attr) {
+    return attr_data_types[attr];
+  }
+  static constexpr auto attr_data_names {
+    __attribute_names<E>(std::make_index_sequence<max_index>{})
+  };
+  static constexpr auto get_attr_name(const E attr) {
+    return attr_data_names[attr];
+  }
+
+  struct Attribute {  // TODO : put Attribute out of Tuple
+    Attribute(const nlattr * const hdr) : hdr_(hdr) {
+      id_ = static_cast<E>(mnl_attr_get_type(hdr));
+      type_ = Tuple::get_attr_type(id_);
+      mnl_attr_validate(hdr, type_);
+    };
+    auto print() const {
+      std::clog << Tuple::get_attr_name(id_) << ": " << id_ << ' ';
+      switch (type_) {
+        case MNL_TYPE_U8:     std::clog << mnl_attr_get_u8(hdr_); break;
+        case MNL_TYPE_U16:    std::clog << mnl_attr_get_u16(hdr_); break;
+        case MNL_TYPE_U32:    std::clog << mnl_attr_get_u32(hdr_); break;
+        case MNL_TYPE_U64:    std::clog << mnl_attr_get_u64(hdr_); break;
+        case MNL_TYPE_STRING: std::clog << mnl_attr_get_str(hdr_); break;
+        case MNL_TYPE_FLAG:   std::clog << "flag???"; break;
+        case MNL_TYPE_MSECS:  std::clog << "msec???"; break;
+        case MNL_TYPE_NESTED: std::clog << "nested???"; break;
+        case MNL_TYPE_NESTED_COMPAT: std::clog << "nested-compat???"; break;
+        case MNL_TYPE_NUL_STRING: std::clog << mnl_attr_get_str(hdr_); break;
+        case MNL_TYPE_BINARY:std::clog << mnl_attr_get_payload(hdr_); break;
+        default: break;
+      }
+      std::clog << std::endl;
+    }
+
+    E id_;
+    mnl_attr_data_type type_;
+    const nlattr * const hdr_;
+  };
+
+ public:
+  Tuple() = delete;
+  Tuple(std::shared_ptr<buf_t> pbuf, const nlmsghdr * const nlh) : buf_(pbuf) {
+    auto parser = [&] (const nlattr * const hdr) {
+      if (mnl_attr_type_valid(hdr, max_index) < 0) [[unlikely]]
+        throw std::invalid_argument {"invalid atribute index"};
+
+      Attribute attr {hdr};
+      attrs_.emplace(attr.id_, hdr);
+      return MNL_CB_OK;
+    };
+    mnl_attr_parse(
+      nlh,
+      sizeof(nfgenmsg),
+      [] (const nlattr * const hdr, void *data) {
+        return (*static_cast<decltype(parser)*>(data))(hdr);
+      },
+      &parser);
+  }
+
+  inline auto &attrs() const { return attrs_; }
+
+ private:
+  std::shared_ptr<buf_t> buf_;
+  std::map<E, Attribute> attrs_;
+};
+
+template <> struct TupleTraits<ctattr_type> {
+  static constexpr size_t max_index = CTA_MAX;
+};
+template <> struct AttrTraits<ctattr_type, CTA_TUPLE_ORIG> {
+  using type = ctattr_tuple;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_NESTED;
+  static constexpr std::string_view name {"CTA_TUPLE_ORIG"};
+};
+template <> struct AttrTraits<ctattr_type, CTA_TUPLE_REPLY> {
+  using type = ctattr_tuple;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_NESTED;
+  static constexpr std::string_view name {"CTA_TUPLE_REPLY"};
+};
+template <> struct AttrTraits<ctattr_type, CTA_STATUS> {
+  using type = ctattr_tuple;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_UNSPEC;  // XXX:
+  static constexpr std::string_view name {"CTA_STATUS"};
+};
+template <> struct AttrTraits<ctattr_type, CTA_PROTOINFO> {
+  using type = ctattr_protoinfo;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_NESTED;  // XXX:
+  static constexpr std::string_view name {"CTA_PROTOINFO"};
+};
+template <> struct AttrTraits<ctattr_type, CTA_TIMEOUT> {
+  using type = uint32_t;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_U32;
+  static constexpr std::string_view name {"CTA_TIMEOUT"};
+};
+template <> struct AttrTraits<ctattr_type, CTA_MARK> {
+  using type = uint32_t;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_U32;
+  static constexpr std::string_view name {"CTA_MARK"};
+};
+template <> struct AttrTraits<ctattr_type, CTA_USE> {
+  using type = ctattr_tuple;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_UNSPEC; // XXX:
+  static constexpr std::string_view name {"CTA_USE"};
+};
+template <> struct AttrTraits<ctattr_type, CTA_ID> {
+  using type = ctattr_tuple;
+  static constexpr mnl_attr_data_type type_index = MNL_TYPE_UNSPEC; // XXX:
+  static constexpr std::string_view name {"CTA_ID"};
 };
 
 } // namespace tuple
@@ -125,22 +289,36 @@ class Conntrack : public Netfilter {
   }
 
   inline auto list(const uint8_t domain = AF_INET) {
-    return sendmsg<nfgenmsg>([&] (auto &nlhdr, auto &exthdr) {
+
+    Netfilter::bind(NFNLGRP_NONE, MNL_SOCKET_AUTOPID);
+
+    const auto id = send<nfgenmsg>([&] (auto &nlhdr, auto &exthdr) {
       nlhdr.nlmsg_type = (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_GET;
       nlhdr.nlmsg_flags = NLM_F_REQUEST|NLM_F_DUMP;
+      nlhdr.nlmsg_pid = getpid();
 
       exthdr.nfgen_family = domain;
       exthdr.version = NFNETLINK_V0;
       exthdr.res_id = 0;
     });
-  }
 
-  auto recvmsg(const msgid_t id) {
-    buf_t<MNL_SOCKET_DUMP_SIZE/*MNL_SOCKET_BUFFER_SIZE*/> buf;
-
-		if (auto sz = mnl_socket_recvfrom(socket(), buf.data(), buf.size()); sz < 0)
-      [[unlikely]] throw std::system_error {errno, std::system_category(),
-        "failed to recvfrom netlink socket"};
+    std::vector<tuple::Tuple<ctattr_type>> tuples;
+    if (auto pbuf = std::make_shared<buf_t>(recv()); pbuf) {
+      auto callback = [&] (const nlmsghdr * const nlh) {
+        tuples.emplace_back(pbuf, nlh);
+        return MNL_CB_OK;
+      };
+      mnl_cb_run(
+        pbuf->data(),
+        pbuf->size(),
+        id,
+        portid(),
+        [] (const nlmsghdr * const nlh, void * const data) {
+          return (*static_cast<decltype(callback)*>(data))(nlh);
+        },
+        &callback);
+    }
+    return tuples;
   }
 };
 
@@ -153,10 +331,12 @@ using netfilter::conntrack::Conntrack;
 TEST(netlink, socket)
 {
   netlink::Conntrack ct{};
-  ct.bind(NFNLGRP_NONE);
 
-  const auto id = ct.list(AF_INET);
+  const auto tuples = ct.list(AF_INET);
 
-  ct.recvmsg(id);
-
+  for (const auto &t : tuples) {
+    for(const auto &[id, attr] : t.attrs()) {
+      attr.print();
+    }
+  }
 }

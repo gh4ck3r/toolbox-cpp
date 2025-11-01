@@ -1,4 +1,5 @@
 #include <array>
+#include <format>
 #include <random>
 #include <system_error>
 #include <type_traits>
@@ -145,16 +146,12 @@ struct AttrTraits {
 
 template <tuple_enum_t E, size_t...I>
 constexpr auto __attribute_types(std::index_sequence<I...>) {
-  return std::array {
-    AttrTraits<E, static_cast<E>(I)>::type_index...
-  };
+  return std::array { AttrTraits<E, static_cast<E>(I)>::type_index... };
 }
 
 template <tuple_enum_t E, size_t...I>
 constexpr auto __attribute_names(std::index_sequence<I...>) {
-  return std::array {
-    AttrTraits<E, static_cast<E>(I)>::name...
-  };
+  return std::array { AttrTraits<E, static_cast<E>(I)>::name... };
 }
 
 template <tuple_enum_t E>
@@ -162,61 +159,87 @@ struct TupleTraits {
   static constexpr auto max_index = 0;
 };
 
-template <tuple_enum_t E = ctattr_type>
-class Tuple {
-  static constexpr auto max_index = TupleTraits<E>::max_index;
-  static constexpr auto attr_data_types {
-    __attribute_types<E>(std::make_index_sequence<max_index>{})
-  };
-  static constexpr mnl_attr_data_type get_attr_type(const E attr) {
-    return attr_data_types[attr];
-  }
-  static constexpr auto attr_data_names {
-    __attribute_names<E>(std::make_index_sequence<max_index>{})
-  };
-  static constexpr auto get_attr_name(const E attr) {
-    return attr_data_names[attr];
-  }
 
-  struct Attribute {  // TODO : put Attribute out of Tuple
-    Attribute(const nlattr * const hdr) : hdr_(hdr) {
-      id_ = static_cast<E>(mnl_attr_get_type(hdr));
-      type_ = Tuple::get_attr_type(id_);
-      mnl_attr_validate(hdr, type_);
-    };
-    auto print() const {
-      std::clog << Tuple::get_attr_name(id_) << ": " << id_ << ' ';
-      switch (type_) {
-        case MNL_TYPE_U8:     std::clog << mnl_attr_get_u8(hdr_); break;
-        case MNL_TYPE_U16:    std::clog << mnl_attr_get_u16(hdr_); break;
-        case MNL_TYPE_U32:    std::clog << mnl_attr_get_u32(hdr_); break;
-        case MNL_TYPE_U64:    std::clog << mnl_attr_get_u64(hdr_); break;
-        case MNL_TYPE_STRING: std::clog << mnl_attr_get_str(hdr_); break;
-        case MNL_TYPE_FLAG:   std::clog << "flag???"; break;
-        case MNL_TYPE_MSECS:  std::clog << "msec???"; break;
-        case MNL_TYPE_NESTED: std::clog << "nested???"; break;
-        case MNL_TYPE_NESTED_COMPAT: std::clog << "nested-compat???"; break;
-        case MNL_TYPE_NUL_STRING: std::clog << mnl_attr_get_str(hdr_); break;
-        case MNL_TYPE_BINARY:std::clog << mnl_attr_get_payload(hdr_); break;
-        default: break;
-      }
-      std::clog << std::endl;
-    }
-
-    E id_;
-    mnl_attr_data_type type_;
-    const nlattr * const hdr_;
+template <tuple_enum_t E>
+class Attribute {
+  static constexpr auto data_types {
+    __attribute_types<E>(std::make_index_sequence<TupleTraits<E>::max_index>{})
   };
 
  public:
+  Attribute(const nlattr & hdr) :
+    id_(static_cast<E>(mnl_attr_get_type(&hdr))),
+    type_(data_types[id_]),
+    data_(mnl_attr_get_payload(&hdr))
+  {
+    mnl_attr_validate(&hdr, type_);  // TODO: check return value
+  }
+
+  template <typename T>
+  inline auto value() const {
+    if constexpr (std::is_same_v<std::decay_t<T>, void>) {
+      return data_;
+    }
+    else if constexpr (std::is_same_v<std::decay_t<T>, std::string_view>) {
+      return T{reinterpret_cast<const char*>(data_)};
+    }
+    else {
+      return *reinterpret_cast<std::add_pointer_t<T>>(data_);
+    }
+  }
+
+ private:
+  friend std::ostream &operator<<(std::ostream &os, const Attribute &attr) {
+    switch (attr.type_) {
+      case MNL_TYPE_U8:     os << attr.value<uint8_t>(); break;
+      case MNL_TYPE_U16:    os << attr.value<uint16_t>(); break;
+      case MNL_TYPE_U32:    os << attr.value<uint32_t>(); break;
+      case MNL_TYPE_U64:    os << attr.value<uint64_t>(); break;
+      case MNL_TYPE_STRING: os << attr.value<std::string_view>(); break;
+      case MNL_TYPE_FLAG:   os << "flag???"; break;
+      case MNL_TYPE_MSECS:  os << "msec???"; break;
+      case MNL_TYPE_NESTED: os << "nested???"; break;
+      case MNL_TYPE_NESTED_COMPAT: os << "nested-compat???"; break;
+      case MNL_TYPE_NUL_STRING: os << attr.value<std::string_view>(); break;
+      case MNL_TYPE_BINARY: os << attr.value<void>(); break;
+      default: break;
+    }
+    return os;
+  }
+
+ private:
+  const E id_;
+  const mnl_attr_data_type type_;
+  void * const data_;
+};
+
+template <tuple_enum_t E, E ATTR>
+struct CAttribute : Attribute<E> {
+  decltype(auto) value() const {
+    return Attribute<E>::template value<typename AttrTraits<E, ATTR>::type>();
+  };
+};
+
+
+template <tuple_enum_t E = ctattr_type>
+class Tuple : public std::map<E, Attribute<E>> {
+  using base_t = std::map<E, Attribute<E>>;
+  static constexpr auto max_index = TupleTraits<E>::max_index;
+  static constexpr auto attr_names_ {
+    __attribute_names<E>(std::make_index_sequence<max_index>{})
+  };
+
+ public:
+  inline static constexpr auto attr_names(auto idx) { return attr_names_[idx]; }
+
   Tuple() = delete;
   Tuple(std::shared_ptr<buf_t> pbuf, const nlmsghdr * const nlh) : buf_(pbuf) {
     auto parser = [&] (const nlattr * const hdr) {
       if (mnl_attr_type_valid(hdr, max_index) < 0) [[unlikely]]
         throw std::invalid_argument {"invalid atribute index"};
 
-      Attribute attr {hdr};
-      attrs_.emplace(attr.id_, hdr);
+      const auto id = (static_cast<E>(mnl_attr_get_type(hdr)));
+      base_t::emplace(id, *hdr);
       return MNL_CB_OK;
     };
     mnl_attr_parse(
@@ -228,11 +251,8 @@ class Tuple {
       &parser);
   }
 
-  inline auto &attrs() const { return attrs_; }
-
  private:
   std::shared_ptr<buf_t> buf_;
-  std::map<E, Attribute> attrs_;
 };
 
 template <> struct TupleTraits<ctattr_type> {
@@ -335,8 +355,30 @@ TEST(netlink, socket)
   const auto tuples = ct.list(AF_INET);
 
   for (const auto &t : tuples) {
-    for(const auto &[id, attr] : t.attrs()) {
-      attr.print();
+    for(const auto &[id, attr] : t) {
+      const auto &name = t.attr_names(id);
+      std::clog
+        << std::format("[{:2}] {:16}: ", static_cast<unsigned>(id), name)
+        << attr << std::endl;
     }
   }
+}
+
+TEST(Attribute, attr)
+{
+  constexpr struct {
+    nlattr hdr {
+      .nla_len = sizeof(nlattr) + sizeof(data),
+      .nla_type = CTA_TIMEOUT,
+    };
+    uint32_t data { 10 };
+  } data;
+
+  using netlink::netfilter::conntrack::tuple::Attribute;
+  Attribute<ctattr_type> attr {data.hdr};
+  EXPECT_EQ(attr.value<decltype(data.data)>(), data.data);
+
+  using netlink::netfilter::conntrack::tuple::CAttribute;
+  CAttribute<ctattr_type, static_cast<ctattr_type>(data.hdr.nla_type)> cattr {data.hdr};
+  EXPECT_EQ(cattr.value(), data.data);
 }

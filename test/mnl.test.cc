@@ -1,14 +1,15 @@
-#include <array>
-#include <format>
 #include <random>
 #include <system_error>
 #include <type_traits>
-#include <utility>
-#include <vector>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <linux/netlink.h>
-#include <linux/netfilter/nfnetlink_conntrack.h>
-#include <libmnl/libmnl.h>
 #include <gtest/gtest.h>
+#include <linux/netfilter/nfnetlink_conntrack.h>
+#include <linux/netfilter/nf_conntrack_common.h>
+#include <linux/netfilter/nf_conntrack_tcp.h>
+#include <libmnl/libmnl.h>
 
 void print(const nlmsghdr * const hdr)
 {
@@ -46,10 +47,72 @@ enum class Family {
   SMC             = NETLINK_SMC,
 };
 
+template <typename T>
+concept attr_type_t = std::integral<T> || std::is_enum_v<T>;
 
-template <typename F, typename EXTHDR>
-concept header_initiator_t = std::is_invocable_v<F, nlmsghdr&, EXTHDR&>;
-  using buf_t = std::vector<uint8_t>;
+template <attr_type_t auto ATTR>
+struct AttrData { using type = void; };
+
+struct alignas(NLA_ALIGNTO) Attribute : nlattr {
+  static_assert(sizeof(nlattr) == NLA_HDRLEN);
+
+  Attribute() = delete;
+  Attribute(nlattr attr) : nlattr(attr) {
+    if (nla_len < NLA_HDRLEN) nla_len = NLA_HDRLEN;
+  }
+
+ protected:
+  template <typename R = void>
+  inline std::add_pointer_t<R> data() const {
+    if (nla_len <= NLA_HDRLEN) [[unlikely]] return nullptr;
+
+    return reinterpret_cast<std::add_pointer_t<R>>(
+      const_cast<uint8_t*>(
+        reinterpret_cast<const uint8_t*>(this) + NLA_HDRLEN));
+  }
+};
+
+template <attr_type_t auto ATTR>
+struct alignas(NLA_ALIGNTO) AttributeFor : Attribute
+{
+  using value_type = AttrData<ATTR>::type;
+  static constexpr auto value_len = [] {
+    if constexpr (std::is_void_v<value_type>) return 0;
+    else return sizeof(value_type);
+  }();
+  std::array<uint8_t, value_len> value_;
+
+  AttributeFor() : Attribute({
+    .nla_len = NLA_HDRLEN,
+    .nla_type = ATTR,
+  })
+  {
+    std::cout << "sizeof(this): " << sizeof(value_) << std::endl;
+  }
+
+#if 1
+  AttributeFor(value_type v) : Attribute({
+    .nla_len = NLA_HDRLEN + value_len,  // TODO: align
+    .nla_type = ATTR,
+  })
+  {
+    if constexpr (value_len) {
+      *data<value_type>() = v;
+    }
+  }
+#endif
+
+  inline auto &value() const { return *(value_type*)(value_); }
+};
+
+struct alignas(NLMSG_ALIGNTO) Message {
+  Message(nlmsghdr hdr);
+  template<typename EXTHDR>
+  Message &&extra_header(EXTHDR) &&;
+
+  template <attr_type_t auto ATTR>
+  Message &&attr(AttributeFor<ATTR>) &&;
+};
 
 template <Family BUS>
 class Socket {
@@ -84,6 +147,7 @@ class Socket {
   const auto socket() const { return socket_; }
   using msgid_t = uint32_t;
 
+  #if 0
   template <typename EXTHDR, header_initiator_t<EXTHDR> CALLBACK>
   msgid_t send(CALLBACK callback) {
     buf_t buf(MNL_SOCKET_BUFFER_SIZE, 0);
@@ -103,7 +167,9 @@ class Socket {
     }
     return nlh->nlmsg_seq;
   }
+  #endif
 
+  #if 0
   auto recv() {
     buf_t buf (MNL_SOCKET_BUFFER_SIZE, 0);
 
@@ -122,263 +188,145 @@ class Socket {
 
     return buf;
   }
+  #endif
 
  private:
   mnl_socket * const socket_;
   msgid_t seq_;
 };
 
-using Netfilter = Socket<Family::NETFILTER>;
-namespace netfilter {
-namespace conntrack {
-
-namespace tuple {
-
-template <typename T>
-concept tuple_enum_t = std::is_enum_v<T>;
-
-template <tuple_enum_t E, E ATTR>
-struct AttrTraits {
-  using type = void;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_UNSPEC;
-  static constexpr std::string_view name {"Unknown"};
-};
-
-template <tuple_enum_t E, size_t...I>
-constexpr auto __attribute_types(std::index_sequence<I...>) {
-  return std::array { AttrTraits<E, static_cast<E>(I)>::type_index... };
-}
-
-template <tuple_enum_t E, size_t...I>
-constexpr auto __attribute_names(std::index_sequence<I...>) {
-  return std::array { AttrTraits<E, static_cast<E>(I)>::name... };
-}
-
-template <tuple_enum_t E>
-struct TupleTraits {
-  static constexpr auto max_index = 0;
-};
-
-
-template <tuple_enum_t E>
-class Attribute {
-  static constexpr auto data_types {
-    __attribute_types<E>(std::make_index_sequence<TupleTraits<E>::max_index>{})
-  };
-
- public:
-  Attribute(const nlattr & hdr) :
-    id_(static_cast<E>(mnl_attr_get_type(&hdr))),
-    type_(data_types[id_]),
-    data_(mnl_attr_get_payload(&hdr))
-  {
-    mnl_attr_validate(&hdr, type_);  // TODO: check return value
-  }
-
-  template <typename T>
-  inline auto value() const {
-    if constexpr (std::is_same_v<std::decay_t<T>, void>) {
-      return data_;
-    }
-    else if constexpr (std::is_same_v<std::decay_t<T>, std::string_view>) {
-      return T{reinterpret_cast<const char*>(data_)};
-    }
-    else {
-      return *reinterpret_cast<std::add_pointer_t<T>>(data_);
-    }
-  }
-
- private:
-  friend std::ostream &operator<<(std::ostream &os, const Attribute &attr) {
-    switch (attr.type_) {
-      case MNL_TYPE_U8:     os << attr.value<uint8_t>(); break;
-      case MNL_TYPE_U16:    os << attr.value<uint16_t>(); break;
-      case MNL_TYPE_U32:    os << attr.value<uint32_t>(); break;
-      case MNL_TYPE_U64:    os << attr.value<uint64_t>(); break;
-      case MNL_TYPE_STRING: os << attr.value<std::string_view>(); break;
-      case MNL_TYPE_FLAG:   os << "flag???"; break;
-      case MNL_TYPE_MSECS:  os << "msec???"; break;
-      case MNL_TYPE_NESTED: os << "nested???"; break;
-      case MNL_TYPE_NESTED_COMPAT: os << "nested-compat???"; break;
-      case MNL_TYPE_NUL_STRING: os << attr.value<std::string_view>(); break;
-      case MNL_TYPE_BINARY: os << attr.value<void>(); break;
-      default: break;
-    }
-    return os;
-  }
-
- private:
-  const E id_;
-  const mnl_attr_data_type type_;
-  void * const data_;
-};
-
-template <tuple_enum_t E, E ATTR>
-struct CAttribute : Attribute<E> {
-  decltype(auto) value() const {
-    return Attribute<E>::template value<typename AttrTraits<E, ATTR>::type>();
-  };
-};
-
-
-template <tuple_enum_t E = ctattr_type>
-class Tuple : public std::map<E, Attribute<E>> {
-  using base_t = std::map<E, Attribute<E>>;
-  static constexpr auto max_index = TupleTraits<E>::max_index;
-  static constexpr auto attr_names_ {
-    __attribute_names<E>(std::make_index_sequence<max_index>{})
-  };
-
- public:
-  inline static constexpr auto attr_names(auto idx) { return attr_names_[idx]; }
-
-  Tuple() = delete;
-  Tuple(std::shared_ptr<buf_t> pbuf, const nlmsghdr * const nlh) : buf_(pbuf) {
-    auto parser = [&] (const nlattr * const hdr) {
-      if (mnl_attr_type_valid(hdr, max_index) < 0) [[unlikely]]
-        throw std::invalid_argument {"invalid atribute index"};
-
-      const auto id = (static_cast<E>(mnl_attr_get_type(hdr)));
-      base_t::emplace(id, *hdr);
-      return MNL_CB_OK;
-    };
-    mnl_attr_parse(
-      nlh,
-      sizeof(nfgenmsg),
-      [] (const nlattr * const hdr, void *data) {
-        return (*static_cast<decltype(parser)*>(data))(hdr);
-      },
-      &parser);
-  }
-
- private:
-  std::shared_ptr<buf_t> buf_;
-};
-
-template <> struct TupleTraits<ctattr_type> {
-  static constexpr size_t max_index = CTA_MAX;
-};
-template <> struct AttrTraits<ctattr_type, CTA_TUPLE_ORIG> {
-  using type = ctattr_tuple;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_NESTED;
-  static constexpr std::string_view name {"CTA_TUPLE_ORIG"};
-};
-template <> struct AttrTraits<ctattr_type, CTA_TUPLE_REPLY> {
-  using type = ctattr_tuple;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_NESTED;
-  static constexpr std::string_view name {"CTA_TUPLE_REPLY"};
-};
-template <> struct AttrTraits<ctattr_type, CTA_STATUS> {
-  using type = ctattr_tuple;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_UNSPEC;  // XXX:
-  static constexpr std::string_view name {"CTA_STATUS"};
-};
-template <> struct AttrTraits<ctattr_type, CTA_PROTOINFO> {
-  using type = ctattr_protoinfo;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_NESTED;  // XXX:
-  static constexpr std::string_view name {"CTA_PROTOINFO"};
-};
-template <> struct AttrTraits<ctattr_type, CTA_TIMEOUT> {
-  using type = uint32_t;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_U32;
-  static constexpr std::string_view name {"CTA_TIMEOUT"};
-};
-template <> struct AttrTraits<ctattr_type, CTA_MARK> {
-  using type = uint32_t;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_U32;
-  static constexpr std::string_view name {"CTA_MARK"};
-};
-template <> struct AttrTraits<ctattr_type, CTA_USE> {
-  using type = ctattr_tuple;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_UNSPEC; // XXX:
-  static constexpr std::string_view name {"CTA_USE"};
-};
-template <> struct AttrTraits<ctattr_type, CTA_ID> {
-  using type = ctattr_tuple;
-  static constexpr mnl_attr_data_type type_index = MNL_TYPE_UNSPEC; // XXX:
-  static constexpr std::string_view name {"CTA_ID"};
-};
-
-} // namespace tuple
-
-class Conntrack : public Netfilter {
- public:
-  inline void bind(const nfnetlink_groups groups,
-                   const pid_t pid = MNL_SOCKET_AUTOPID) {
-    Netfilter::bind(groups, pid);
-  }
-
-  inline auto list(const uint8_t domain = AF_INET) {
-
-    Netfilter::bind(NFNLGRP_NONE, MNL_SOCKET_AUTOPID);
-
-    const auto id = send<nfgenmsg>([&] (auto &nlhdr, auto &exthdr) {
-      nlhdr.nlmsg_type = (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_GET;
-      nlhdr.nlmsg_flags = NLM_F_REQUEST|NLM_F_DUMP;
-      nlhdr.nlmsg_pid = getpid();
-
-      exthdr.nfgen_family = domain;
-      exthdr.version = NFNETLINK_V0;
-      exthdr.res_id = 0;
-    });
-
-    std::vector<tuple::Tuple<ctattr_type>> tuples;
-    if (auto pbuf = std::make_shared<buf_t>(recv()); pbuf) {
-      auto callback = [&] (const nlmsghdr * const nlh) {
-        tuples.emplace_back(pbuf, nlh);
-        return MNL_CB_OK;
-      };
-      mnl_cb_run(
-        pbuf->data(),
-        pbuf->size(),
-        id,
-        portid(),
-        [] (const nlmsghdr * const nlh, void * const data) {
-          return (*static_cast<decltype(callback)*>(data))(nlh);
-        },
-        &callback);
-    }
-    return tuples;
-  }
-};
-
-} // namespace conntrack
-} // namespace netfilter
-using netfilter::conntrack::Conntrack;
+template <> struct AttrData<CTA_IP_V4_SRC> { using type = in_addr_t; };
+template <> struct AttrData<CTA_IP_V4_DST> { using type = in_addr_t; };
 
 } // namespace netlink
 
-TEST(netlink, socket)
-{
-  netlink::Conntrack ct{};
+class NetlinkAttributeTest : public ::testing::Test {
+ protected:
+};
 
-  const auto tuples = ct.list(AF_INET);
-
-  for (const auto &t : tuples) {
-    for(const auto &[id, attr] : t) {
-      const auto &name = t.attr_names(id);
-      std::clog
-        << std::format("[{:2}] {:16}: ", static_cast<unsigned>(id), name)
-        << attr << std::endl;
-    }
+struct Buffer : std::vector<uint8_t> {
+  Buffer() {
+    resize(NLA_HDRLEN + NLA_ALIGN(sizeof(in_addr_t)));
   }
-}
+};
 
-TEST(Attribute, attr)
+TEST_F(NetlinkAttributeTest, AttributeStaticAsserts)
 {
-  constexpr struct {
-    nlattr hdr {
-      .nla_len = sizeof(nlattr) + sizeof(data),
-      .nla_type = CTA_TIMEOUT,
-    };
-    uint32_t data { 10 };
-  } data;
-
-  using netlink::netfilter::conntrack::tuple::Attribute;
-  Attribute<ctattr_type> attr {data.hdr};
-  EXPECT_EQ(attr.value<decltype(data.data)>(), data.data);
-
-  using netlink::netfilter::conntrack::tuple::CAttribute;
-  CAttribute<ctattr_type, static_cast<ctattr_type>(data.hdr.nla_type)> cattr {data.hdr};
-  EXPECT_EQ(cattr.value(), data.data);
+  using netlink::Attribute;
+  static_assert(!std::is_constructible_v<Attribute>);
+  static_assert(std::is_constructible_v<Attribute, nlattr>);
 }
+
+TEST_F(NetlinkAttributeTest, AttributeDefault)
+{
+  struct Attribute : netlink::Attribute {
+    Attribute(nlattr attr) : netlink::Attribute{attr} {}
+    using netlink::Attribute::data;
+  };
+
+  Attribute a {{}}; 
+
+  EXPECT_EQ(a.nla_len, sizeof(nlattr));
+  EXPECT_EQ(a.nla_type, 0);
+  EXPECT_EQ(a.data(), nullptr);
+}
+
+#if 1
+TEST_F(NetlinkAttributeTest, build_Attribute_UNSPEC)
+{
+  using namespace netlink;
+
+  std::vector<uint8_t> buf(NLA_HDRLEN + NLA_ALIGN(sizeof(in_addr_t)));
+
+  void *ptr = buf.data();
+  auto size = buf.size();
+  constexpr auto type = CTA_UNSPEC;
+  using attr_t = AttributeFor<type>;
+  ASSERT_NE(std::align(std::alignment_of_v<attr_t>, sizeof(attr_t), ptr, size), nullptr);
+  EXPECT_EQ(size, buf.size());
+
+  auto attr = new (ptr) attr_t;
+
+  EXPECT_EQ(attr->nla_len, sizeof(attr_t));
+  EXPECT_EQ(attr->nla_type, type);
+}
+#endif
+
+#if 0
+TEST_F(NetlinkAttributeTest, build_Attribute_in_addr_t)
+{
+  using namespace netlink;
+
+  std::vector<uint8_t> buf(NLA_HDRLEN + NLA_ALIGN(sizeof(in_addr_t)));
+
+  void *ptr = buf.data();
+  auto size = buf.size();
+  using cta_ipv4_src_t = AttributeFor<CTA_IP_V4_SRC>;
+  ASSERT_NE(std::align(std::alignment_of_v<cta_ipv4_src_t>, sizeof(cta_ipv4_src_t), ptr, size), nullptr);
+  EXPECT_EQ(size, buf.size());
+
+  const auto addr {inet_addr("1.1.1.1")};
+  auto attr = new (ptr) cta_ipv4_src_t{addr};
+
+  EXPECT_EQ(attr->nla_len, sizeof(cta_ipv4_src_t));
+  EXPECT_EQ(attr->nla_len, NLA_HDRLEN + sizeof(cta_ipv4_src_t::value_type));
+  EXPECT_EQ(attr->nla_type, CTA_IP_V4_SRC);
+  EXPECT_EQ(attr->value(), addr);
+}
+#endif
+
+#if 0
+TEST_F(NetlinkAttributeTest, build_Message)
+{
+  using namespace netlink;
+  uint16_t i = 80;
+
+  uint32_t seq = std::mt19937{std::random_device{}()}();
+  [[maybe_unused]] auto m = Message {{
+      .nlmsg_type = (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_NEW,
+      .nlmsg_flags = NLM_F_REQUEST|NLM_F_CREATE|NLM_F_EXCL|NLM_F_ACK,
+      .nlmsg_seq = seq,
+    }}
+    .extra_header<nfgenmsg>({
+      .nfgen_family = AF_INET,
+      .version = NFNETLINK_V0,
+      .res_id = 0,
+    })
+    .attr<CTA_TUPLE_ORIG>({
+      Attribute<CTA_TUPLE_IP> {
+        Attribute<CTA_IP_V4_SRC>{inet_addr("1.1.1.1")},
+        Attribute<CTA_IP_V4_DST>{inet_addr("2.2.2.2")}
+      },
+      Attribute<CTA_TUPLE_PROTO> {
+        Attribute<CTA_PROTO_NUM>(IPPROTO_TCP),
+        Attribute<CTA_PROTO_SRC_PORT>(htons(i)),
+        Attribute<CTA_PROTO_DST_PORT>(htons(1025))
+      }
+    })
+    .attr<CTA_TUPLE_REPLY>([&] (auto &reply) {
+      reply.template attr<CTA_TUPLE_IP>([] (auto &ip) {
+        ip.template attr<CTA_IP_V4_SRC>(inet_addr("2.2.2.2"))
+          .template attr<CTA_IP_V4_DST>(inet_addr("1.1.1.1"))
+          ;
+      });
+      reply.template attr<CTA_TUPLE_PROTO>([&] (auto &proto) {
+        proto
+          .template attr<CTA_PROTO_NUM>(IPPROTO_TCP)
+          .template attr<CTA_PROTO_SRC_PORT>(htons(1025))
+          .template attr<CTA_PROTO_DST_PORT>(htons(i))
+          ;
+      });
+    })
+    .attr<CTA_PROTOINFO>([] (auto &proto_info) {
+      proto_info.template attr<CTA_PROTOINFO_TCP>([] (auto &tcp) {
+        tcp.template attr<CTA_PROTOINFO_TCP_STATE>(TCP_CONNTRACK_SYN_SENT);
+      });
+    })
+    .attr<CTA_STATUS>(htonl(IPS_CONFIRMED))
+    .attr<CTA_TIMEOUT>(htonl(1000))
+    ;
+
+  // TODO: FIXME
+  // const nlmsghdr * const buf = m;
+}
+#endif

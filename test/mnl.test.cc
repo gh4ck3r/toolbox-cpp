@@ -50,14 +50,11 @@ enum class Family {
 template <typename T>
 concept attr_type_t = std::integral<T> || std::is_enum_v<T>;
 
-template <attr_type_t auto ATTR>
-struct AttrData { using type = void; };
-
-struct alignas(NLA_ALIGNTO) Attribute : nlattr {
+struct alignas(NLA_ALIGNTO) AttrHdr : nlattr {
   static_assert(sizeof(nlattr) == NLA_HDRLEN);
 
-  Attribute() = delete;
-  Attribute(nlattr attr) : nlattr(attr) {
+  AttrHdr() = delete;
+  AttrHdr(nlattr attr) : nlattr(attr) {
     if (nla_len < NLA_HDRLEN) nla_len = NLA_HDRLEN;
   }
 
@@ -72,37 +69,49 @@ struct alignas(NLA_ALIGNTO) Attribute : nlattr {
   }
 };
 
-template <attr_type_t auto ATTR>
-struct alignas(NLA_ALIGNTO) AttributeFor : Attribute
-{
-  using value_type = AttrData<ATTR>::type;
-  static constexpr auto value_len = [] {
-    if constexpr (std::is_void_v<value_type>) return 0;
-    else return sizeof(value_type);
+template <typename T>
+class alignas(alignof(AttrHdr)) AttrData {
+  struct Empty {};
+ protected:
+  [[no_unique_address]] std::conditional_t<std::is_void_v<T>, Empty, T> value_;
+  static constexpr size_t len = [] {
+    if constexpr (std::is_void_v<T>)
+      return 0;
+    else
+      return sizeof(T);
   }();
-  std::array<uint8_t, value_len> value_;
 
-  AttributeFor() : Attribute({
-    .nla_len = NLA_HDRLEN,
-    .nla_type = ATTR,
-  })
+  AttrData() {
+    static_assert(std::is_void_v<T>);
+  };
+  template <typename...ARGS>
+  requires std::is_constructible_v<T, ARGS...>
+  AttrData(ARGS&&...args) :
+    value_(std::forward<ARGS>(args)...)
+  {}
+
+ public:
+  using value_type = T;
+};
+
+template <attr_type_t auto ATTR>
+struct AttrTraits { using type = void; };
+
+template <attr_type_t auto ATTR>
+struct alignas(alignof(AttrHdr)) Attribute : AttrHdr, AttrData<typename AttrTraits<ATTR>::type>
+{
+  using body_t = AttrData<typename AttrTraits<ATTR>::type>;
+  template <typename...ARGS>
+  Attribute(ARGS&&...args) :
+    AttrHdr({
+      .nla_len = NLA_HDRLEN + body_t::len,
+      .nla_type = ATTR,
+    }),
+    body_t(std::forward<ARGS>(args)...)
   {
-    std::cout << "sizeof(this): " << sizeof(value_) << std::endl;
   }
 
-#if 1
-  AttributeFor(value_type v) : Attribute({
-    .nla_len = NLA_HDRLEN + value_len,  // TODO: align
-    .nla_type = ATTR,
-  })
-  {
-    if constexpr (value_len) {
-      *data<value_type>() = v;
-    }
-  }
-#endif
-
-  inline auto &value() const { return *(value_type*)(value_); }
+  auto &value() const { return *static_cast<std::add_pointer_t<typename body_t::value_type>>(data()); };
 };
 
 struct alignas(NLMSG_ALIGNTO) Message {
@@ -111,7 +120,7 @@ struct alignas(NLMSG_ALIGNTO) Message {
   Message &&extra_header(EXTHDR) &&;
 
   template <attr_type_t auto ATTR>
-  Message &&attr(AttributeFor<ATTR>) &&;
+  Message &&attr(Attribute<ATTR>) &&;
 };
 
 template <Family BUS>
@@ -195,13 +204,65 @@ class Socket {
   msgid_t seq_;
 };
 
-template <> struct AttrData<CTA_IP_V4_SRC> { using type = in_addr_t; };
-template <> struct AttrData<CTA_IP_V4_DST> { using type = in_addr_t; };
+template <> struct AttrTraits<CTA_STATUS> { using type = uint32_t; };
+template <> struct AttrTraits<CTA_TIMEOUT> { using type = uint32_t; };
+
+template <> struct AttrTraits<CTA_IP_V4_SRC> { using type = in_addr_t; };
+template <> struct AttrTraits<CTA_IP_V4_DST> { using type = in_addr_t; };
 
 } // namespace netlink
 
 class NetlinkAttributeTest : public ::testing::Test {
  protected:
+  using buf_t = std::vector<uint8_t>;
+
+  template <netlink::attr_type_t auto ATTR>
+  static constexpr auto make_buf() {
+    using data_t = netlink::AttrTraits<ATTR>::type;
+    if constexpr (std::is_void_v<data_t>)
+      return buf_t (NLA_HDRLEN);
+    else
+      return buf_t (NLA_HDRLEN + NLA_ALIGN(sizeof(data_t)));
+  }
+
+  template <typename T, typename...ARGS>
+  T& make_attr(buf_t &buf, ARGS&&...args) {
+    void *ptr = buf.data();
+    auto size = buf.size();
+    if (!std::align(std::alignment_of_v<T>, sizeof(T), ptr, size)) {
+      ADD_FAILURE() << "failed to align attribute buffer";
+    }
+    EXPECT_EQ(size, buf.size());
+
+    return *new (ptr) T {std::forward<ARGS>(args)...};
+  }
+
+  template <netlink::attr_type_t auto ATTR>
+  void test_build_attr() {
+    using attr_t = netlink::Attribute<ATTR>;
+    static_assert(std::is_void_v<typename attr_t::value_type>);
+
+    auto buf = make_buf<ATTR>();
+    auto &attr = make_attr<attr_t>(buf);
+
+    EXPECT_EQ(attr.nla_len, sizeof(attr_t));
+    EXPECT_EQ(attr.nla_len, NLA_HDRLEN);
+    EXPECT_EQ(attr.nla_type, ATTR);
+  }
+
+  template <netlink::attr_type_t auto ATTR>
+  void test_build_attr(const netlink::Attribute<ATTR>::value_type value) {
+    using attr_t = netlink::Attribute<ATTR>;
+    static_assert(!std::is_void_v<typename attr_t::value_type>);
+
+    auto buf = make_buf<ATTR>();
+    auto &attr = make_attr<attr_t>(buf, value);
+
+    EXPECT_EQ(attr.nla_len, sizeof(attr_t));
+    EXPECT_EQ(attr.nla_len, NLA_HDRLEN + sizeof(typename attr_t::value_type));
+    EXPECT_EQ(attr.nla_type, ATTR);
+    EXPECT_EQ(attr.value(), value);
+  }
 };
 
 struct Buffer : std::vector<uint8_t> {
@@ -212,16 +273,16 @@ struct Buffer : std::vector<uint8_t> {
 
 TEST_F(NetlinkAttributeTest, AttributeStaticAsserts)
 {
-  using netlink::Attribute;
-  static_assert(!std::is_constructible_v<Attribute>);
-  static_assert(std::is_constructible_v<Attribute, nlattr>);
+  using netlink::AttrHdr;
+  static_assert(!std::is_constructible_v<AttrHdr>);
+  static_assert(std::is_constructible_v<AttrHdr, nlattr>);
 }
 
 TEST_F(NetlinkAttributeTest, AttributeDefault)
 {
-  struct Attribute : netlink::Attribute {
-    Attribute(nlattr attr) : netlink::Attribute{attr} {}
-    using netlink::Attribute::data;
+  struct Attribute : netlink::AttrHdr {
+    Attribute(nlattr attr) : netlink::AttrHdr{attr} {}
+    using netlink::AttrHdr::data;
   };
 
   Attribute a {{}}; 
@@ -229,51 +290,43 @@ TEST_F(NetlinkAttributeTest, AttributeDefault)
   EXPECT_EQ(a.nla_len, sizeof(nlattr));
   EXPECT_EQ(a.nla_type, 0);
   EXPECT_EQ(a.data(), nullptr);
+  EXPECT_EQ(sizeof(a), sizeof(nlattr));
 }
 
-#if 1
 TEST_F(NetlinkAttributeTest, build_Attribute_UNSPEC)
 {
-  using namespace netlink;
-
-  std::vector<uint8_t> buf(NLA_HDRLEN + NLA_ALIGN(sizeof(in_addr_t)));
-
-  void *ptr = buf.data();
-  auto size = buf.size();
-  constexpr auto type = CTA_UNSPEC;
-  using attr_t = AttributeFor<type>;
-  ASSERT_NE(std::align(std::alignment_of_v<attr_t>, sizeof(attr_t), ptr, size), nullptr);
-  EXPECT_EQ(size, buf.size());
-
-  auto attr = new (ptr) attr_t;
-
-  EXPECT_EQ(attr->nla_len, sizeof(attr_t));
-  EXPECT_EQ(attr->nla_type, type);
+  SCOPED_TRACE("Testing CTA_UNSPEC");
+  test_build_attr<CTA_UNSPEC>();
 }
-#endif
 
-#if 0
-TEST_F(NetlinkAttributeTest, build_Attribute_in_addr_t)
+TEST_F(NetlinkAttributeTest, build_Attribute_CTA_STATUS)
 {
-  using namespace netlink;
-
-  std::vector<uint8_t> buf(NLA_HDRLEN + NLA_ALIGN(sizeof(in_addr_t)));
-
-  void *ptr = buf.data();
-  auto size = buf.size();
-  using cta_ipv4_src_t = AttributeFor<CTA_IP_V4_SRC>;
-  ASSERT_NE(std::align(std::alignment_of_v<cta_ipv4_src_t>, sizeof(cta_ipv4_src_t), ptr, size), nullptr);
-  EXPECT_EQ(size, buf.size());
-
-  const auto addr {inet_addr("1.1.1.1")};
-  auto attr = new (ptr) cta_ipv4_src_t{addr};
-
-  EXPECT_EQ(attr->nla_len, sizeof(cta_ipv4_src_t));
-  EXPECT_EQ(attr->nla_len, NLA_HDRLEN + sizeof(cta_ipv4_src_t::value_type));
-  EXPECT_EQ(attr->nla_type, CTA_IP_V4_SRC);
-  EXPECT_EQ(attr->value(), addr);
+  const uint32_t value = 30;
+  SCOPED_TRACE("Testing CTA_STATUS");
+  test_build_attr<CTA_STATUS>(value);
 }
-#endif
+
+TEST_F(NetlinkAttributeTest, build_Attribute_CTA_TIMEOUT)
+{
+  const uint32_t value = 1000;
+  SCOPED_TRACE("Testing CTA_TIMEOUT");
+  test_build_attr<CTA_TIMEOUT>(value);
+}
+
+TEST_F(NetlinkAttributeTest, build_Attribute_CTA_IP_V4_SRC)
+{
+  const auto addr {inet_addr("1.1.1.1")};
+  SCOPED_TRACE("Testing CTA_IP_V4_SRC");
+  test_build_attr<CTA_IP_V4_SRC>(addr);
+}
+
+TEST_F(NetlinkAttributeTest, build_Attribute_CTA_IP_V4_DST)
+{
+  const auto addr {inet_addr("2.2.2.2")};
+  SCOPED_TRACE("Testing CTA_IP_V4_DST");
+  test_build_attr<CTA_IP_V4_DST>(addr);
+}
+
 
 #if 0
 TEST_F(NetlinkAttributeTest, build_Message)

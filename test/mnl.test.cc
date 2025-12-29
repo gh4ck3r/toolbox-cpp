@@ -12,6 +12,8 @@
 #include <linux/netfilter/nf_conntrack_tcp.h>
 #include <libmnl/libmnl.h>
 
+#include <gh4ck3r/hexdump.hh>
+
 std::ostream &operator<<(std::ostream &os, const nlmsghdr &hdr) {
   return os
       << "nlmsg_len  : "   << hdr.nlmsg_len
@@ -154,7 +156,7 @@ struct Buffer : std::pmr::memory_resource {
   std::size_t spc_;
   std::size_t cap_;
 
-  inline void* do_allocate( std::size_t bytes, std::size_t alignment ) final {
+  inline void* do_allocate(std::size_t bytes, std::size_t alignment) final {
     if (!beg_) [[unlikely]] {
       beg_ = end_ = new std::byte[cap_];
       spc_ = cap_;
@@ -169,12 +171,17 @@ struct Buffer : std::pmr::memory_resource {
     return p;
   }
 
-  inline void do_deallocate( void* p, std::size_t bytes, std::size_t alignment ) final {
+  inline void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) final {
     throw std::logic_error{"Netlink Message Buffer shouldn't be deallocated"};
   }
 
-  inline bool do_is_equal( const std::pmr::memory_resource& other ) const noexcept final {
+  inline bool do_is_equal(const std::pmr::memory_resource& other) const noexcept final {
     return false;
+  }
+
+ protected:
+  auto dump() {
+    return gh4ck3r::hexdump(reinterpret_cast<uint8_t*>(beg_), reinterpret_cast<uint8_t*>(end_));
   }
 };
 
@@ -182,6 +189,8 @@ class Message : Buffer {
   nlmsghdr * msghdr_;
 
  public:
+  using Buffer::dump; // XXX: debug
+
   Message() = delete;
   Message(const Message &) = delete;
   Message &operator=(const Message &) = delete;
@@ -231,7 +240,14 @@ struct ExtraHeader : Message {
   }
 
   template <attr_type_t auto ATTR>
-  Message &&attr(Attribute<ATTR>) &&;
+  ExtraHeader &&attr(AttrTraits<ATTR>::type &&arg) && {
+    construct<nlattr>(nlattr {
+      .nla_len = NLA_HDRLEN + sizeof(arg),
+      .nla_type = ATTR,
+    });
+    construct<typename AttrTraits<ATTR>::type>(std::forward<decltype(arg)>(arg));
+    return std::move(*this);
+  }
 
   inline T& hdr() const { return *exthdr_; }
   inline operator T&() const { return hdr(); }
@@ -479,6 +495,24 @@ TEST_F(NetlinkAttributeTest, build_ExtraHeader)
   EXPECT_EQ(eh.hdr().nfgen_family, AF_INET);
   EXPECT_EQ(eh.hdr().version, NFNETLINK_V0);
   EXPECT_EQ(eh.hdr().res_id, 0);
+}
+
+TEST_F(NetlinkAttributeTest, build_ExtraHeaderAttr)
+{
+  auto eh = netlink::Message ({
+      .nlmsg_type = (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_NEW,
+      .nlmsg_flags = NLM_F_REQUEST|NLM_F_CREATE|NLM_F_EXCL|NLM_F_ACK,
+    })
+    .extra_header<nfgenmsg>({
+      .nfgen_family = AF_INET,
+      .version = NFNETLINK_V0,
+      .res_id = 0,
+    })
+    .attr<CTA_STATUS>(htonl(IPS_CONFIRMED))
+    .attr<CTA_TIMEOUT>(htonl(1000))
+  ;
+  std::cout << eh << std::endl;
+  std::cout << eh.dump() << std::endl;
 }
 
 #if 0

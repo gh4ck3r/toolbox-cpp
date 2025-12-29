@@ -1,3 +1,4 @@
+#include <memory_resource>
 #include <random>
 #include <system_error>
 #include <type_traits>
@@ -11,13 +12,20 @@
 #include <linux/netfilter/nf_conntrack_tcp.h>
 #include <libmnl/libmnl.h>
 
-void print(const nlmsghdr * const hdr)
-{
-	std::clog << "nlmsg_len  : " << hdr->nlmsg_len << std::endl;
-  std::clog << "nlmsg_type : " << hdr->nlmsg_type << std::endl;
-  std::clog << "nlmsg_flags: " << hdr->nlmsg_flags << std::endl;
-  std::clog << "nlmsg_seq  : " << hdr->nlmsg_seq << std::endl;
-  std::clog << "nlmsg_pid  : " << hdr->nlmsg_pid << std::endl;
+std::ostream &operator<<(std::ostream &os, const nlmsghdr &hdr) {
+  return os
+      << "nlmsg_len  : "   << hdr.nlmsg_len
+      << "\nnlmsg_type : " << hdr.nlmsg_type
+      << "\nnlmsg_flags: " << hdr.nlmsg_flags
+      << "\nnlmsg_seq  : " << hdr.nlmsg_seq
+      << "\nnlmsg_pid  : " << hdr.nlmsg_pid;
+}
+
+std::ostream &operator<<(std::ostream &os, const nfgenmsg &hdr) {
+  return os
+      << "nfgen_family: " << static_cast<int>(hdr.nfgen_family)
+      << "\nversion: " << static_cast<int>(hdr.version)
+      << "\nres_id: " << hdr.res_id;
 }
 
 namespace netlink {
@@ -114,13 +122,125 @@ struct alignas(alignof(AttrHdr)) Attribute : AttrHdr, AttrData<typename AttrTrai
   auto &value() const { return *static_cast<std::add_pointer_t<typename body_t::value_type>>(data()); };
 };
 
-struct alignas(NLMSG_ALIGNTO) Message {
-  Message(nlmsghdr hdr);
+
+template <typename T> struct ExtraHeader;
+
+struct Buffer : std::pmr::memory_resource {
+  static constexpr size_t DEFAULT_CAPACITY = 1024;
+
+  Buffer(const decltype(nlmsghdr::nlmsg_len) capacity = DEFAULT_CAPACITY) :
+    beg_{nullptr},
+    end_{nullptr},
+    spc_{0},
+    cap_(capacity)
+  {}
+  ~Buffer() { if (beg_) delete [] beg_; }
+
+  Buffer(const Buffer &) = delete;
+  Buffer& operator=(const Buffer &) = delete;
+  inline Buffer(Buffer&& other) { operator=(std::move(other)); }
+  inline Buffer& operator=(Buffer &&rhs) {
+    beg_ = std::exchange(rhs.beg_, nullptr);
+    end_ = std::exchange(rhs.end_, nullptr);
+    spc_ = std::exchange(rhs.spc_, 0);
+    cap_ = std::exchange(rhs.cap_, DEFAULT_CAPACITY);
+    return *this;
+  }
+
+  const auto size() const { return end_ - beg_; }
+
+ private:
+  std::byte *beg_, *end_;
+  std::size_t spc_;
+  std::size_t cap_;
+
+  inline void* do_allocate( std::size_t bytes, std::size_t alignment ) final {
+    if (!beg_) [[unlikely]] {
+      beg_ = end_ = new std::byte[cap_];
+      spc_ = cap_;
+    }
+
+    auto p = std::align(alignment, bytes, reinterpret_cast<void*&>(end_), spc_);
+    if (p) [[likely]] {
+      spc_ -= (reinterpret_cast<std::byte*>(p) - end_) + bytes;
+      end_ = reinterpret_cast<std::byte*>(p) + bytes;
+    }
+
+    return p;
+  }
+
+  inline void do_deallocate( void* p, std::size_t bytes, std::size_t alignment ) final {
+    throw std::logic_error{"Netlink Message Buffer shouldn't be deallocated"};
+  }
+
+  inline bool do_is_equal( const std::pmr::memory_resource& other ) const noexcept final {
+    return false;
+  }
+};
+
+class Message : Buffer {
+  nlmsghdr * msghdr_;
+
+ public:
+  Message() = delete;
+  Message(const Message &) = delete;
+  Message &operator=(const Message &) = delete;
+  Message(Message &&rhs) = default;
+  Message &operator=(Message &&) = delete;
+
+  Message(::nlmsghdr hdr) :
+    Buffer(1024),
+    msghdr_(reinterpret_cast<nlmsghdr*>(allocate(NLMSG_HDRLEN, NLMSG_ALIGNTO)))
+  {
+    *msghdr_ = hdr;
+    msghdr_->nlmsg_len = NLMSG_HDRLEN;
+  }
+
   template<typename EXTHDR>
-  Message &&extra_header(EXTHDR) &&;
+  inline ExtraHeader<EXTHDR> extra_header(const EXTHDR &exthdr) && {
+    return {std::move(*this), exthdr};
+  }
+
+  inline operator nlmsghdr &() const { return *msghdr_; }
+
+  inline const auto &type() const { return msghdr_->nlmsg_type; }
+  inline const auto &flags() const { return msghdr_->nlmsg_flags; }
+  inline const auto &seq() const { return msghdr_->nlmsg_seq; }
+  inline const auto &pid() const { return msghdr_->nlmsg_pid; }
+
+ protected:
+  template <typename U, typename...ARGS>
+  requires std::is_constructible_v<U, ARGS...>
+  U* construct(ARGS&&...args) {
+    auto const p = reinterpret_cast<U*>(allocate(sizeof(U), std::alignment_of_v<U>));
+    if (!p) [[unlikely]] throw std::bad_alloc{};
+
+    msghdr_->nlmsg_len = Buffer::size();
+
+    return std::construct_at(p, std::forward<ARGS>(args)...);
+  }
+};
+
+template <typename T>
+struct ExtraHeader : Message {
+  ExtraHeader() = delete;
+  ExtraHeader(Message &&msg, const T &exthdr) :
+    Message{std::move(msg)},
+    exthdr_{construct<T>(exthdr)}
+  {
+  }
 
   template <attr_type_t auto ATTR>
   Message &&attr(Attribute<ATTR>) &&;
+
+  inline T& hdr() const { return *exthdr_; }
+  inline operator T&() const { return hdr(); }
+
+ private:
+  T *exthdr_;
+  friend std::ostream &operator<<(std::ostream &os, const ExtraHeader &eh) {
+    return os << static_cast<nlmsghdr&>(eh) << std::endl << *eh.exthdr_;
+  }
 };
 
 template <Family BUS>
@@ -327,6 +447,39 @@ TEST_F(NetlinkAttributeTest, build_Attribute_CTA_IP_V4_DST)
   test_build_attr<CTA_IP_V4_DST>(addr);
 }
 
+
+TEST_F(NetlinkAttributeTest, build_Message)
+{
+  uint32_t seq = std::mt19937{std::random_device{}()}();
+  auto m = netlink::Message ({
+      .nlmsg_type = (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_NEW,
+      .nlmsg_flags = NLM_F_REQUEST|NLM_F_CREATE|NLM_F_EXCL|NLM_F_ACK,
+      .nlmsg_seq = seq,
+    });
+  EXPECT_EQ(m.type(), (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_NEW);
+  EXPECT_EQ(m.flags(), NLM_F_REQUEST|NLM_F_CREATE|NLM_F_EXCL|NLM_F_ACK);
+  EXPECT_EQ(m.seq(), seq);
+  EXPECT_EQ(m.pid(), 0);
+}
+
+TEST_F(NetlinkAttributeTest, build_ExtraHeader)
+{
+  auto eh = netlink::Message ({
+      .nlmsg_type = (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_NEW,
+      .nlmsg_flags = NLM_F_REQUEST|NLM_F_CREATE|NLM_F_EXCL|NLM_F_ACK,
+    }).extra_header<nfgenmsg>({
+      .nfgen_family = AF_INET,
+      .version = NFNETLINK_V0,
+      .res_id = 0,
+    });
+  //std::cout << eh << std::endl;
+  EXPECT_EQ(eh.type(), (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_NEW);
+  EXPECT_EQ(eh.flags(), NLM_F_REQUEST|NLM_F_CREATE|NLM_F_EXCL|NLM_F_ACK);
+
+  EXPECT_EQ(eh.hdr().nfgen_family, AF_INET);
+  EXPECT_EQ(eh.hdr().version, NFNETLINK_V0);
+  EXPECT_EQ(eh.hdr().res_id, 0);
+}
 
 #if 0
 TEST_F(NetlinkAttributeTest, build_Message)

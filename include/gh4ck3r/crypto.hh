@@ -125,7 +125,7 @@ class Cipher {
     int32_t outl;
     constexpr auto EVP_CryptFinal = Encrypt ? EVP_EncryptFinal_ex : EVP_DecryptFinal_ex;
     if (1 != EVP_CryptFinal(ctx_, outbuf_.data() + outbuf_offset_, &outl))
-      throw std::runtime_error/* ERR */ {"Failed to finalize"};
+      throw ERR {"Failed to finalize"};
     outbuf_offset_ += static_cast<size_t>(outl);
     outbuf_.resize(outbuf_offset_);
     outbuf_.shrink_to_fit();

@@ -7,7 +7,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
   string(APPEND CMAKE_CXX_FLAGS_RELEASE " -O2 -Werror")
 endif()
 
-link_libraries(gh4ck3r GTest::gtest_main mnl)
+link_libraries(gh4ck3r GTest::gtest_main GTest::gmock mnl)
 
 include(GoogleTest)
 function(add_unittest TestMainSrc)

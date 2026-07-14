@@ -230,3 +230,43 @@ TEST(TempDir, extension)
   EXPECT_EQ(d.path().stem(), name) << d;
   EXPECT_NE(d.path().extension(), name.extension()) << d;
 }
+
+TEST(file_time_type, system_clock)
+{
+  using std::chrono::system_clock;
+  using namespace std::chrono_literals;
+  using namespace std::string_view_literals;
+
+  const auto before = system_clock::now();
+  std::this_thread::sleep_for(2ms);  // XXX: suppresss the time drift
+
+  gh4ck3r::file::FileWriter<gh4ck3r::file::TempFile> tmpfile;
+
+  const auto after = system_clock::now();
+  ASSERT_LE(before, after);
+
+  const auto ftime =
+    gh4ck3r::file::cast_to<system_clock>(last_write_time(tmpfile.path()));
+  EXPECT_LE(before, ftime);
+  EXPECT_GE(after, ftime);
+}
+
+TEST(file_time_type, steady_clock)
+{
+  using std::chrono::steady_clock;
+  using namespace std::chrono_literals;
+  using namespace std::string_view_literals;
+
+  const auto before = steady_clock::now();
+  std::this_thread::sleep_for(2ms);  // XXX: suppresss the time drift
+
+  gh4ck3r::file::FileWriter<gh4ck3r::file::TempFile> tmpfile;
+
+  const auto after = steady_clock::now();
+  ASSERT_LE(before, after);
+
+  const auto ftime =
+    gh4ck3r::file::cast_to<steady_clock>(last_write_time(tmpfile.path()));
+  EXPECT_LE(before, ftime);
+  EXPECT_GE(after, ftime);
+}

@@ -228,8 +228,12 @@ class TempDir {
     path_(build_path(prefix))
   {}
 
-  ~TempDir() noexcept {
-    remove_all(path_); // TODO: handle exception
+  ~TempDir() noexcept try {
+    remove_all(path_);
+  } catch (const std::bad_alloc &e) {
+    std::cerr << "failed to remove TempDir: " << e.what() << std::endl;
+  } catch (...) {
+    std::cerr << "Unknown exception while destruction TempDir" << std::endl;
   }
 
   inline const auto &path() const { return path_; }
@@ -256,15 +260,22 @@ class TempDir {
   const fs::path path_;
 };
 
+
 template <typename Clock> requires requires {
-  Clock::time_point;
-  Clock::duration;
+  typename Clock::time_point;
+  typename Clock::duration;
   Clock::now();
 }
 typename Clock::time_point cast_to(const fs::file_time_type &filetime) {
-  return std::chrono::time_point_cast<typename Clock::duration>(
-    filetime - fs::file_time_type::clock::now()
-    + Clock::now());
+  //return std::chrono::clock_cast<std::chrono::system_clock>(filetime);
+  static const auto G_CLOCK_OFFSET = [] {
+    // XXX: consequent calling of now() makes a little bit of time drift
+    const auto f = fs::file_time_type::clock::now();
+    const auto c = Clock::now();
+    return c.time_since_epoch() - f.time_since_epoch();
+  }();
+  return typename Clock::time_point {
+    filetime.time_since_epoch() + G_CLOCK_OFFSET};
 }
 
 inline void copy_attrs(const fs::path &from, const fs::path &to, const fs::directory_entry &src)

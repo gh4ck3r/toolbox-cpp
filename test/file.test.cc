@@ -146,7 +146,7 @@ TEST(is_executable, default)
 TEST(FileWriter, default)
 {
   struct FileMock : gh4ck3r::file::FileTrait {
-    MOCK_METHOD(std::filesystem::path, path, (), (const override));
+    MOCK_METHOD(const std::filesystem::path&, path, (), (const override));
     MOCK_METHOD(gh4ck3r::file::fd_t, fd, (), (const override));
   };
   gh4ck3r::file::FileWriter<FileMock> writer {};
@@ -208,7 +208,7 @@ TEST(TempDir, basic)
   std::filesystem::path tempdir;
   {
     const std::filesystem::path name {"temp-prefix"};
-    gh4ck3r::file::TempDir d{ name};
+    gh4ck3r::file::TempDir d {name};
     EXPECT_TRUE(std::filesystem::is_directory(d));
 
     EXPECT_EQ(d.path().parent_path(), std::filesystem::temp_directory_path()) << d;
@@ -269,4 +269,48 @@ TEST(file_time_type, steady_clock)
     gh4ck3r::file::cast_to<steady_clock>(last_write_time(tmpfile.path()));
   EXPECT_LE(before, ftime);
   EXPECT_GE(after, ftime);
+}
+
+TEST(copy_attrs, file)
+{
+  const gh4ck3r::file::TempFile src;
+  ASSERT_TRUE(is_regular_file(src.path()));
+
+  using namespace std::chrono_literals;
+  std::this_thread::sleep_for(5ms);
+
+  const auto dst{std::filesystem::path{src.path()}.replace_extension(".backup")};
+  ASSERT_FALSE(is_regular_file(dst));
+  ASSERT_TRUE(copy_file(src.path(), dst));
+  ASSERT_TRUE(exists(dst));
+  EXPECT_NE(std::filesystem::last_write_time(src.path()),
+            std::filesystem::last_write_time(dst));
+
+  gh4ck3r::file::copy_attrs(src.path(), dst);
+  EXPECT_EQ(std::filesystem::last_write_time(src.path()),
+            std::filesystem::last_write_time(dst));
+
+  EXPECT_TRUE(std::filesystem::remove(dst)) << dst;
+}
+
+TEST(copy_attrs, dir)
+{
+  const gh4ck3r::file::TempDir src{"test"};
+  ASSERT_TRUE(is_directory(src.path()));
+
+  using namespace std::chrono_literals;
+  std::this_thread::sleep_for(5ms);
+
+  const auto dst{std::filesystem::path{src.path()}.replace_extension(".backup")};
+  ASSERT_FALSE(exists(dst));
+  copy(src.path(), dst);
+  ASSERT_TRUE(exists(dst));
+  EXPECT_NE(std::filesystem::last_write_time(src.path()),
+            std::filesystem::last_write_time(dst));
+
+  gh4ck3r::file::copy_attrs(src.path(), dst);
+  EXPECT_EQ(std::filesystem::last_write_time(src.path()),
+            std::filesystem::last_write_time(dst));
+
+  EXPECT_TRUE(std::filesystem::remove(dst)) << dst;
 }

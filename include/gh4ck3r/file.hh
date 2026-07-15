@@ -118,7 +118,7 @@ inline std::pair<fd_t, fs::path> create_tempfile(fs::path p = "XXXXXX")
 class FileTrait
 {
  public:
-  virtual fs::path path() const = 0;
+  virtual const fs::path &path() const = 0;
   virtual fd_t fd() const = 0;
   virtual ~FileTrait() noexcept {}
 
@@ -189,7 +189,8 @@ class AnonymousFile : public FileTrait
 
   ~AnonymousFile() noexcept { ::close(fd_); }
 
-  fs::path path() const final { throw std::logic_error {"This is anonymous file"}; }
+ private:
+  const fs::path &path() const final { throw std::logic_error {"This is anonymous file"}; }
 
  protected:
   fd_t fd() const final { return fd_; }
@@ -213,7 +214,7 @@ class TempFile : public FileTrait
     std::cerr << "unknown exception while destruct TempFile";
   }
 
-  fs::path path() const final { return path_; }
+  const fs::path &path() const final { return path_; }
   fd_t fd() const final { return fd_; }
 
  private:
@@ -221,7 +222,7 @@ class TempFile : public FileTrait
   fd_t fd_ {-1};
 };
 
-class TempDir {
+class TempDir : public FileTrait {
  public:
   TempDir() = delete;
   explicit TempDir(const fs::path &prefix) :
@@ -236,7 +237,7 @@ class TempDir {
     std::cerr << "Unknown exception while destruction TempDir" << std::endl;
   }
 
-  inline const auto &path() const { return path_; }
+  inline const fs::path &path() const override { return path_; }
   operator const fs::path& () const { return path(); }
 
   fs::path operator/(const fs::path &rhs) const {
@@ -244,6 +245,8 @@ class TempDir {
   }
 
  private:
+  fd_t fd() const final { throw std::logic_error {"TempDir doesn't have a file descriptor"}; }
+
   fs::path build_path(const fs::path &prefix) const {
     const auto tmpl = (fs::temp_directory_path() / prefix).concat(".XXXXXX").string();
     if (!::mkdtemp(const_cast<char*>(tmpl.data()))) [[unlikely]]
@@ -257,7 +260,7 @@ class TempDir {
   }
 
  private:
-  const fs::path path_;
+  fs::path path_;
 };
 
 
@@ -278,23 +281,26 @@ typename Clock::time_point cast_to(const fs::file_time_type &filetime) {
     filetime.time_since_epoch() + G_CLOCK_OFFSET};
 }
 
-inline void copy_attrs(const fs::path &from, const fs::path &to, const fs::directory_entry &src)
+inline void copy_attrs(const fs::path &from, const fs::path &to, const fs::directory_entry &src = {})
 {
   if (src.is_directory())
     for (const auto &e : fs::directory_iterator{src}) copy_attrs(from, to, e);
 
-  const auto &dst = src == from ? to : to / src.path().lexically_relative(from);
-  last_write_time(dst, src.last_write_time());
+  const auto &dst = (!src.exists() || src == from) ?
+    to : to / src.path().lexically_relative(from);
+  last_write_time(dst, last_write_time(from));
 }
 
 inline std::error_code copy_all(const fs::path &from, const fs::path &to)
 {
   std::error_code ec;
+  if (from == to) [[unlikely]] return ec;
+
   copy(from, to, fs::copy_options::recursive, ec);
-  if (!ec) copy_attrs(from, to, fs::directory_entry {from});
+  if (!ec) [[likely]] copy_attrs(from, to, fs::directory_entry {from});
 
   if (ec) [[unlikely]]
-    std::clog << "failed to copy " << from << " to " << to
+    std::cerr << "failed to copy " << from << " to " << to
       << ": " << ec.message();
 
   return ec;

@@ -103,6 +103,7 @@ inline std::pair<fd_t, fs::path> create_tempfile(fs::path p = "XXXXXX")
 
   if (constexpr std::string_view suffix {"XXXXXX"};
       !p.filename().string().ends_with(suffix)) {
+    if (is_directory(p)) p /= "";
     if (p.has_filename()) p += std::string{"."};
     p += suffix;
   }
@@ -291,11 +292,11 @@ inline void copy_attrs(const fs::path &from, const fs::path &to, const fs::direc
   last_write_time(dst, last_write_time(from));
 }
 
-inline std::error_code copy_all(const fs::path &from, const fs::path &to)
+inline bool copy_all(const fs::path &from, const fs::path &to)
 {
-  std::error_code ec;
-  if (from == to) [[unlikely]] return ec;
+  if (from == to) [[unlikely]] return false;
 
+  std::error_code ec;
   copy(from, to, fs::copy_options::recursive, ec);
   if (!ec) [[likely]] copy_attrs(from, to, fs::directory_entry {from});
 
@@ -303,7 +304,7 @@ inline std::error_code copy_all(const fs::path &from, const fs::path &to)
     std::cerr << "failed to copy " << from << " to " << to
       << ": " << ec.message();
 
-  return ec;
+  return true;
 }
 
 } // namespace gh4ck3r::file

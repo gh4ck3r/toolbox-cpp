@@ -314,3 +314,47 @@ TEST(copy_attrs, dir)
 
   EXPECT_TRUE(std::filesystem::remove(dst)) << dst;
 }
+
+
+TEST(copy_all, dir)
+{
+  using gh4ck3r::file::TempDir;
+  using gh4ck3r::file::TempFile;
+
+  const gh4ck3r::file::TempDir srcdir {"test-src"};
+  ASSERT_TRUE(exists(srcdir.path()));
+  const gh4ck3r::file::TempDir dstdir {"test-dst"};
+  ASSERT_TRUE(exists(dstdir.path()));
+
+  TempFile f1 {srcdir };
+  ASSERT_TRUE(is_regular_file(f1.path()));
+  ASSERT_EQ(f1.path().parent_path(), srcdir) << f1.path();
+
+  TempFile f2 { srcdir };
+  ASSERT_TRUE(is_regular_file(f2.path()));
+  ASSERT_EQ(f2.path().parent_path(), srcdir);
+
+  const auto subdir {std::filesystem::path{"1st"}/"2nd"/"3rd"};
+  ASSERT_TRUE(create_directories(srcdir / subdir));
+  TempFile f3 { srcdir / subdir };
+  ASSERT_EQ(f3.path().parent_path(), srcdir / subdir);
+
+  EXPECT_TRUE(gh4ck3r::file::copy_all(srcdir, dstdir));
+
+  EXPECT_TRUE(is_directory(dstdir / subdir));
+  EXPECT_TRUE(is_regular_file(dstdir / f1.path().filename()));
+  EXPECT_TRUE(is_regular_file(dstdir / f2.path().filename()));
+  EXPECT_TRUE(is_regular_file(dstdir / subdir / f3.path().filename()));
+
+  constexpr auto EXPECT_TS_EQ = [] (const auto &lhs, const auto &rhs) {
+    using res = std::chrono::milliseconds;
+    const auto diff = duration_cast<res>(last_write_time(lhs) - last_write_time(rhs));
+    EXPECT_LE(abs(diff.count()), 2); // XXX:margin for time drift
+  };
+  EXPECT_TS_EQ(srcdir.path(), dstdir.path());
+  EXPECT_TS_EQ(srcdir.path() / subdir, dstdir.path() / subdir);
+
+  EXPECT_TS_EQ(f1.path(), dstdir / f1.path().filename());
+  EXPECT_TS_EQ(f2.path(), dstdir / f2.path().filename());
+  EXPECT_TS_EQ(f3.path(), dstdir / subdir / f3.path().filename());
+}

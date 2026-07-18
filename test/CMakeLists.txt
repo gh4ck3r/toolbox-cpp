@@ -1,10 +1,20 @@
 cmake_minimum_required(VERSION 3.20)
 find_package(GTest)
 
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+
 if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
   string(APPEND CMAKE_CXX_FLAGS " -pipe -pedantic -Wall -O -ggdb")
   string(APPEND CMAKE_CXX_FLAGS_DEBUG " -O0 -Og -ggdb3")
   string(APPEND CMAKE_CXX_FLAGS_RELEASE " -O2 -Werror")
+endif()
+
+if(ENABLE_ASAN)
+  string(APPEND CMAKE_CXX_FLAGS " -fsanitize=address")
+  string(APPEND CMAKE_CXX_FLAGS " -fno-omit-frame-pointer")
+  string(APPEND CMAKE_CXX_FLAGS " -Wno-maybe-uninitialized")
+  string(APPEND CMAKE_EXE_LINKER_FLAGS " -fsanitize=address")
+  string(APPEND CMAKE_SHARED_LINKER_FLAGS " -fsanitize=address")
 endif()
 
 link_libraries(gh4ck3r GTest::gtest_main GTest::gmock mnl)

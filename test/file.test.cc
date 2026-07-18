@@ -5,55 +5,52 @@
 
 #include <fcntl.h>
 
+using namespace gh4ck3r::filesystem;
+
 TEST(is_valid, valid)
 {
-  EXPECT_TRUE(gh4ck3r::file::is_valid(STDIN_FILENO));
-  EXPECT_TRUE(gh4ck3r::file::is_valid(STDOUT_FILENO));
-  EXPECT_TRUE(gh4ck3r::file::is_valid(STDERR_FILENO));
+  EXPECT_TRUE(is_valid(STDIN_FILENO));
+  EXPECT_TRUE(is_valid(STDOUT_FILENO));
+  EXPECT_TRUE(is_valid(STDERR_FILENO));
 }
 
 TEST(is_valid, invalid)
 {
-  EXPECT_FALSE(gh4ck3r::file::is_valid(-1));
+  EXPECT_FALSE(is_valid(-1));
 }
 
 TEST(is_valid, closed)
 {
   const int fd = ::open(__FILE__, O_RDONLY);
   ASSERT_NE(-1, fd);
-  EXPECT_TRUE(gh4ck3r::file::is_valid(fd));
+  EXPECT_TRUE(is_valid(fd));
   ::close(fd);
-  EXPECT_FALSE(gh4ck3r::file::is_valid(fd));
+  EXPECT_FALSE(is_valid(fd));
 }
 
-class unique_fd_Test : public ::testing::Test {
- protected:
-  using unique_fd = gh4ck3r::file::unique_fd;
-};
-
-TEST_F(unique_fd_Test, basic)
+TEST(unique_fd, basic)
 {
   const int fd = ::open(__FILE__, O_RDONLY);
   ASSERT_NE(-1, fd);
 
-  EXPECT_TRUE(gh4ck3r::file::is_valid(fd));
+  EXPECT_TRUE(is_valid(fd));
   {
     unique_fd ufd { fd };
     EXPECT_EQ(fd, ufd);
     EXPECT_TRUE(ufd);
   }
 
-  EXPECT_FALSE(gh4ck3r::file::is_valid(fd));
+  EXPECT_FALSE(is_valid(fd));
 }
 
 TEST(create_tempfile, default)
 {
-  const auto [fd, path] = gh4ck3r::file::create_tempfile();
+  const auto [fd, path] = create_tempfile();
   ASSERT_GE(fd, 0);
-  EXPECT_EQ(std::filesystem::file_size(path), 0);
+  EXPECT_EQ(file_size(path), 0);
   EXPECT_TRUE(remove(path));
 
-  EXPECT_EQ(path.parent_path(), std::filesystem::temp_directory_path());
+  EXPECT_EQ(path.parent_path(), temp_directory_path());
   EXPECT_TRUE(path.has_filename());
   EXPECT_FALSE(path.has_extension());
 }
@@ -61,20 +58,20 @@ TEST(create_tempfile, default)
 TEST(create_tempfile, named)
 {
   constexpr std::string_view filename {"hello"};
-  const auto [fd, path] = gh4ck3r::file::create_tempfile(filename);
+  const auto [fd, path] = create_tempfile(filename);
   EXPECT_TRUE(remove(path));
 
-  EXPECT_EQ(path.parent_path(), std::filesystem::temp_directory_path());
+  EXPECT_EQ(path.parent_path(), temp_directory_path());
   EXPECT_EQ(path.stem(), filename);
   EXPECT_TRUE(path.has_extension());
 }
 
 TEST(create_tempfile, designated_directory)
 {
-  const auto tempdir = std::filesystem::read_symlink("/proc/self/cwd") / "";
+  const auto tempdir = read_symlink("/proc/self/cwd") / "";
   ASSERT_FALSE(tempdir.has_filename());
 
-  const auto [fd, path] = gh4ck3r::file::create_tempfile(tempdir);
+  const auto [fd, path] = create_tempfile(tempdir);
   EXPECT_TRUE(remove(path));
 
   EXPECT_TRUE(equivalent(path.parent_path(), tempdir));
@@ -84,12 +81,12 @@ TEST(create_tempfile, designated_directory)
 
 TEST(load_file, default)
 {
-  const auto [fd, path] = gh4ck3r::file::create_tempfile();
+  const auto [fd, path] = create_tempfile();
 
   constexpr std::string_view content {"0123456789"};
   std::ofstream {path} << content;
 
-  EXPECT_EQ(gh4ck3r::file::load_file(path),
+  EXPECT_EQ(load_file(path),
             std::vector<uint8_t>(content.begin(), content.end()));
 
   EXPECT_TRUE(remove(path));
@@ -97,59 +94,56 @@ TEST(load_file, default)
 
 TEST(load_file, string)
 {
-  const auto [fd, path] = gh4ck3r::file::create_tempfile();
+  const auto [fd, path] = create_tempfile();
 
   constexpr std::string_view content {"Hello World!"};
   std::ofstream {path} << content;
 
-  EXPECT_EQ(gh4ck3r::file::load_file<std::string>(path), content);
+  EXPECT_EQ(load_file<std::string>(path), content);
 
   EXPECT_TRUE(remove(path));
 }
 
 TEST(load_file, invalid_argument)
 {
-  EXPECT_THROW(gh4ck3r::file::load_file("/proc"), std::invalid_argument);
-  EXPECT_THROW(gh4ck3r::file::load_file("/dev/stdin"), std::invalid_argument);
+  EXPECT_THROW(load_file("/proc"), std::invalid_argument);
+  EXPECT_THROW(load_file("/dev/stdin"), std::invalid_argument);
 }
 
 TEST(dir_siz, default)
 {
-  const auto tempdir = std::filesystem::read_symlink("/proc/self/cwd") / "";
+  const auto tempdir = read_symlink("/proc/self/cwd") / "";
   ASSERT_FALSE(tempdir.has_filename());
 
-  const auto before = gh4ck3r::file::dir_siz(tempdir);
-  const auto [fd, path] = gh4ck3r::file::create_tempfile(tempdir);
-  EXPECT_EQ(before + 1, gh4ck3r::file::dir_siz(tempdir));
+  const auto before = dir_siz(tempdir);
+  const auto [fd, path] = create_tempfile(tempdir);
+  EXPECT_EQ(before + 1, dir_siz(tempdir));
   EXPECT_TRUE(remove(path));
-  EXPECT_EQ(before, gh4ck3r::file::dir_siz(tempdir));
+  EXPECT_EQ(before, dir_siz(tempdir));
 }
 
 TEST(is_readable, default)
 {
-  EXPECT_TRUE(gh4ck3r::file::is_readable(
-    std::filesystem::read_symlink("/proc/self/exe")));
+  EXPECT_TRUE(is_readable(read_symlink(path{"/proc/self/exe"})));
 }
 
 TEST(is_writable, default)
 {
-  EXPECT_TRUE(gh4ck3r::file::is_readable(
-    std::filesystem::read_symlink("/proc/self/exe")));
+  EXPECT_TRUE(is_writable(read_symlink(path{"/proc/self/exe"})));
 }
 
 TEST(is_executable, default)
 {
-  EXPECT_TRUE(gh4ck3r::file::is_executable(
-    std::filesystem::read_symlink("/proc/self/exe")));
+  EXPECT_TRUE(is_executable(read_symlink(path{"/proc/self/exe"})));
 }
 
 TEST(FileWriter, default)
 {
-  struct FileMock : gh4ck3r::file::FileTrait {
-    MOCK_METHOD(const std::filesystem::path&, path, (), (const override));
-    MOCK_METHOD(gh4ck3r::file::fd_t, fd, (), (const override));
+  struct FileMock : FileTrait {
+    MOCK_METHOD(const path_t&, path, (), (const override));
+    MOCK_METHOD(fd_t, fd, (), (const override));
   };
-  gh4ck3r::file::FileWriter<FileMock> writer {};
+  FileWriter<FileMock> writer {};
   auto & filemock = writer.file();
 
   EXPECT_CALL(filemock, fd()).WillOnce(::testing::Return(10));
@@ -177,56 +171,56 @@ TEST(AnonymousFile, basic)
 {
   int fd = -1;
   {
-    gh4ck3r::file::AnonymousFile concrete;
-    gh4ck3r::file::FileTrait &f {concrete};
+    AnonymousFile concrete;
+    FileTrait &f {concrete};
 
     EXPECT_THROW(f.path(), std::logic_error);
     EXPECT_TRUE(f.is_valid());
 
     fd = f.fd();
   }
-  EXPECT_FALSE(gh4ck3r::file::is_valid(fd));
+  EXPECT_FALSE(is_valid(fd));
 }
 
 TEST(TempFile, basic)
 {
   int fd = -1;
   {
-    gh4ck3r::file::TempFile concrete;
-    gh4ck3r::file::FileTrait &f {concrete};
+    TempFile concrete;
+    FileTrait &f {concrete};
 
     EXPECT_TRUE(f.is_valid());
     EXPECT_GE(f.path().filename().string().size(), 6);
 
     fd = f.fd();
   }
-  EXPECT_FALSE(gh4ck3r::file::is_valid(fd));
+  EXPECT_FALSE(is_valid(fd));
 }
 
 TEST(TempDir, basic)
 {
-  std::filesystem::path tempdir;
+  path_t tempdir;
   {
-    const std::filesystem::path name {"temp-prefix"};
-    gh4ck3r::file::TempDir d {name};
-    EXPECT_TRUE(std::filesystem::is_directory(d));
+    const path_t name {"temp-prefix"};
+    gh4ck3r::filesystem::TempDir d {name};
+    EXPECT_TRUE(is_directory(d));
 
-    EXPECT_EQ(d.path().parent_path(), std::filesystem::temp_directory_path()) << d;
+    EXPECT_EQ(d.path().parent_path(), temp_directory_path()) << d;
     EXPECT_EQ(d.path().stem(), name) << d;
     EXPECT_TRUE(d.path().has_extension()) << d;
 
     tempdir = d;
   }
-  EXPECT_FALSE(std::filesystem::exists(tempdir));
+  EXPECT_FALSE(exists(tempdir));
 }
 
 TEST(TempDir, extension)
 {
-  const std::filesystem::path name {"temp-prefix.ext"};
-  gh4ck3r::file::TempDir d{ name};
-  EXPECT_TRUE(std::filesystem::is_directory(d));
+  const path_t name {"temp-prefix.ext"};
+  gh4ck3r::filesystem::TempDir d{ name};
+  EXPECT_TRUE(is_directory(d));
 
-  EXPECT_EQ(d.path().parent_path(), std::filesystem::temp_directory_path()) << d;
+  EXPECT_EQ(d.path().parent_path(), temp_directory_path()) << d;
   EXPECT_EQ(d.path().stem(), name) << d;
   EXPECT_NE(d.path().extension(), name.extension()) << d;
 }
@@ -235,18 +229,16 @@ TEST(file_time_type, system_clock)
 {
   using std::chrono::system_clock;
   using namespace std::chrono_literals;
-  using namespace std::string_view_literals;
 
   const auto before = system_clock::now();
   std::this_thread::sleep_for(2ms);  // XXX: suppresss the time drift
 
-  gh4ck3r::file::FileWriter<gh4ck3r::file::TempFile> tmpfile;
+  FileWriter<TempFile> tmpfile;
 
   const auto after = system_clock::now();
   ASSERT_LE(before, after);
 
-  const auto ftime =
-    gh4ck3r::file::cast_to<system_clock>(last_write_time(tmpfile.path()));
+  const auto ftime = clock_cast<system_clock>(last_write_time(tmpfile.path()));
   EXPECT_LE(before, ftime);
   EXPECT_GE(after, ftime);
 }
@@ -255,75 +247,66 @@ TEST(file_time_type, steady_clock)
 {
   using std::chrono::steady_clock;
   using namespace std::chrono_literals;
-  using namespace std::string_view_literals;
 
   const auto before = steady_clock::now();
   std::this_thread::sleep_for(2ms);  // XXX: suppresss the time drift
 
-  gh4ck3r::file::FileWriter<gh4ck3r::file::TempFile> tmpfile;
+  FileWriter<TempFile> tmpfile;
 
   const auto after = steady_clock::now();
   ASSERT_LE(before, after);
 
-  const auto ftime =
-    gh4ck3r::file::cast_to<steady_clock>(last_write_time(tmpfile.path()));
+  const auto ftime = clock_cast<steady_clock>(last_write_time(tmpfile.path()));
   EXPECT_LE(before, ftime);
   EXPECT_GE(after, ftime);
 }
 
 TEST(copy_attrs, file)
 {
-  const gh4ck3r::file::TempFile src;
+  const gh4ck3r::filesystem::TempFile src;
   ASSERT_TRUE(is_regular_file(src.path()));
 
   using namespace std::chrono_literals;
   std::this_thread::sleep_for(5ms);
 
-  const auto dst{std::filesystem::path{src.path()}.replace_extension(".backup")};
+  const auto dst{path{src.path()}.replace_extension(".backup")};
   ASSERT_FALSE(is_regular_file(dst));
   ASSERT_TRUE(copy_file(src.path(), dst));
   ASSERT_TRUE(exists(dst));
-  EXPECT_NE(std::filesystem::last_write_time(src.path()),
-            std::filesystem::last_write_time(dst));
+  EXPECT_NE(last_write_time(src.path()), last_write_time(dst));
 
-  gh4ck3r::file::copy_attrs(src.path(), dst);
-  EXPECT_EQ(std::filesystem::last_write_time(src.path()),
-            std::filesystem::last_write_time(dst));
+  gh4ck3r::filesystem::copy_attrs(src.path(), dst);
+  EXPECT_EQ(last_write_time(src.path()), last_write_time(dst));
 
-  EXPECT_TRUE(std::filesystem::remove(dst)) << dst;
+  EXPECT_TRUE(remove(dst)) << dst;
 }
 
 TEST(copy_attrs, dir)
 {
-  const gh4ck3r::file::TempDir src{"test"};
+  const gh4ck3r::filesystem::TempDir src{"test"};
   ASSERT_TRUE(is_directory(src.path()));
 
   using namespace std::chrono_literals;
   std::this_thread::sleep_for(5ms);
 
-  const auto dst{std::filesystem::path{src.path()}.replace_extension(".backup")};
+  const auto dst{path{src.path()}.replace_extension(".backup")};
   ASSERT_FALSE(exists(dst));
   copy(src.path(), dst);
   ASSERT_TRUE(exists(dst));
-  EXPECT_NE(std::filesystem::last_write_time(src.path()),
-            std::filesystem::last_write_time(dst));
+  EXPECT_NE(last_write_time(src.path()), last_write_time(dst));
 
-  gh4ck3r::file::copy_attrs(src.path(), dst);
-  EXPECT_EQ(std::filesystem::last_write_time(src.path()),
-            std::filesystem::last_write_time(dst));
+  gh4ck3r::filesystem::copy_attrs(src.path(), dst);
+  EXPECT_EQ(last_write_time(src.path()), last_write_time(dst));
 
-  EXPECT_TRUE(std::filesystem::remove(dst)) << dst;
+  EXPECT_TRUE(remove(dst)) << dst;
 }
 
 
 TEST(copy_all, dir)
 {
-  using gh4ck3r::file::TempDir;
-  using gh4ck3r::file::TempFile;
-
-  const gh4ck3r::file::TempDir srcdir {"test-src"};
+  const TempDir srcdir {"test-src"};
   ASSERT_TRUE(exists(srcdir.path()));
-  const gh4ck3r::file::TempDir dstdir {"test-dst"};
+  const TempDir dstdir {"test-dst"};
   ASSERT_TRUE(exists(dstdir.path()));
 
   TempFile f1 {srcdir };
@@ -334,12 +317,12 @@ TEST(copy_all, dir)
   ASSERT_TRUE(is_regular_file(f2.path()));
   ASSERT_EQ(f2.path().parent_path(), srcdir);
 
-  const auto subdir {std::filesystem::path{"1st"}/"2nd"/"3rd"};
+  const auto subdir {path{"1st"}/"2nd"/"3rd"};
   ASSERT_TRUE(create_directories(srcdir / subdir));
   TempFile f3 { srcdir / subdir };
   ASSERT_EQ(f3.path().parent_path(), srcdir / subdir);
 
-  EXPECT_TRUE(gh4ck3r::file::copy_all(srcdir, dstdir));
+  EXPECT_TRUE(copy_all(srcdir, dstdir));
 
   EXPECT_TRUE(is_directory(dstdir / subdir));
   EXPECT_TRUE(is_regular_file(dstdir / f1.path().filename()));
@@ -347,8 +330,8 @@ TEST(copy_all, dir)
   EXPECT_TRUE(is_regular_file(dstdir / subdir / f3.path().filename()));
 
   constexpr auto EXPECT_TS_EQ = [] (const auto &lhs, const auto &rhs) {
-    using res = std::chrono::milliseconds;
-    const auto diff = duration_cast<res>(last_write_time(lhs) - last_write_time(rhs));
+    const auto diff = duration_cast<std::chrono::milliseconds>(
+        last_write_time(lhs) - last_write_time(rhs));
     EXPECT_LE(abs(diff.count()), 2); // XXX:margin for time drift
   };
   EXPECT_TS_EQ(srcdir.path(), dstdir.path());

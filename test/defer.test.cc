@@ -46,3 +46,15 @@ TEST(defer, release)
   }
   EXPECT_EQ(0, v);
 }
+
+TEST(defer, invoke)
+{
+  int v = 0;
+  {
+    Defer _ {[&] {++v;}};
+    EXPECT_EQ(0, v);
+    _();
+    EXPECT_EQ(1, v);
+  }
+  EXPECT_EQ(1, v);
+}

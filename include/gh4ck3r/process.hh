@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -8,8 +9,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+#include <csignal>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/pidfd.h>
+#include <sys/syscall.h>
+#include <gh4ck3r/defer.hh>
 
 namespace gh4ck3r::process {
 
@@ -105,14 +110,27 @@ inline void set_stdio(int in_fd, int out_fd, int err_fd) {
     std::make_pair(err_fd, STDERR_FILENO),
   };
 
+  std::vector<int> close_fds;
   for (const auto &[from, to] : fd_map) {
-    if (from < 0) close(to);
-    else if (dup2(from, to) != -1) close(from);
-    else throw std::system_error { errno, std::system_category(),
-      "failed to set stdio: "
-        + std::to_string(from) + " -> " + std::to_string(to)
-    };
+    if (from < 0) {
+      close_fds.emplace_back(to);
+      continue;
+    }
+    if (from == to) continue;
+
+    if (dup2(from, to) == -1) [[unlikely]] {
+      throw std::system_error { errno, std::system_category(),
+        "failed to set stdio: "
+          + std::to_string(from) + " -> " + std::to_string(to)
+      };
+    }
+
+    if (std::find(close_fds.begin(), close_fds.end(), from) == close_fds.end()) {
+      close_fds.emplace_back(from);
+    }
   }
+
+  for (const auto fd : close_fds) ::close(fd);
 }
 
 inline std::string nameof(pid_t pid) {
@@ -160,6 +178,24 @@ inline void execve(const path_t &file,
   throw std::runtime_error {"This MUST never be reached"};
 }
 
+// https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_22_16
+enum class exit_code : int {
+  success             = EXIT_SUCCESS,
+  failure             = EXIT_FAILURE,
+  // A file to be executed was found, but it was not an executable utility.
+  cannot_execute      = 126,
+  // A utility to be executed was not found.
+  command_not_found   = 127,
+  // An unrecoverable read error was detected by the shell while reading
+  // commands, except from the file operand of the dot special built-in.
+  invalid             = 128,
+  // A command was interrupted by a signal.
+  signaled            = 129,
+  out_of_range        = 255,
+};
+
+inline void exit(exit_code ec) { std::exit(static_cast<int>(ec)); }
+
 /// This is a just simple wrapper around fork/exec.
 [[nodiscard("A caller is responsible for waiting for the child process")]]
 inline pid_t execute(const int stdin,
@@ -173,16 +209,28 @@ inline pid_t execute(const int stdin,
     throw std::invalid_argument {file.string() + " is not an executable"};
 
   const auto pid {fork()};
-  if (pid == 0) [[likely]] {
+  if (pid == 0) try {
     set_stdio(stdin, stdout, stderr);
     execve(file, argv.size() ? argv : Argv {file.c_str()}, envp);
+  } catch (const std::exception &e) {
+    if (0 < stderr) {
+      ::dprintf(STDERR_FILENO, "exception while execute child process: %s\n", e.what());
+    }
+    ::_exit(static_cast<int>(exit_code::invalid));
+  } catch (...) {
+    if (0 < stderr) {
+      ::dprintf(STDERR_FILENO, "unknown exception while execute child process\n");
+    }
+    ::_exit(static_cast<int>(exit_code::invalid));
   } else if (pid < 0) [[unlikely]] {
-    throw std::system_error {errno, std::system_category(), "failed to fork a new process"};
+    throw std::system_error {errno, std::system_category(),
+        "failed to fork a new process"};
   }
 
   return pid;
 }
 
+namespace detail {
 template <typename T>
 std::string stringify(T&& val) {
   if constexpr (std::is_convertible_v<T, std::string>) {
@@ -195,6 +243,7 @@ std::string stringify(T&& val) {
     return ss.str();
   }
 }
+} // namespace detail
 
 template <typename FIRST, typename...REST>
 requires (!std::is_same_v<Argv, std::decay_t<FIRST>>)
@@ -209,8 +258,8 @@ pid_t execute(const int stdin,
                  file,
                  Argv {
                   file.c_str(),
-                  stringify(std::forward<FIRST>(first)).c_str(),
-                  (stringify(std::forward<REST>(rest)).c_str())...
+                  detail::stringify(std::forward<FIRST>(first)).c_str(),
+                  (detail::stringify(std::forward<REST>(rest)).c_str())...
                  });
 }
 
@@ -227,7 +276,7 @@ class timeout_error : public std::runtime_error {
   inline timeout_error(const pid_t &id, const std::chrono::nanoseconds &d) :
     std::runtime_error {
       "process(" + std::to_string(id) + ") is not terminated normally within given duration "
-      + stringify(d)
+      + detail::stringify(d)
     }, pid_(id), duration_(d)
   {}
 
@@ -241,61 +290,67 @@ class timeout_error : public std::runtime_error {
 
 inline int wait(const pid_t pid)
 {
-  if (pid <= 0)
-    throw std::invalid_argument {"pid should be positive to specifiy exact one process: " + std::to_string(pid)};
+  const auto pid_fd {::syscall(SYS_pidfd_open, pid, 0)};
+  if (pid_fd == -1) [[unlikely]] throw std::system_error {
+    errno, std::system_category(), "failed to open pidfd" };
 
-  int status;
-  if (::waitpid(pid, &status, 0) == -1) [[unlikely]]
-    throw std::system_error{errno, std::system_category(), "Process(" + std::to_string(pid) + ") is not waitable"};
-
-  if (!WIFEXITED(status)) [[unlikely]] {
-    // FIXME: more granual error info should be offered
-    throw std::runtime_error {
-      "Process(" + std::to_string(pid) + ") is not terminated normally: " + std::to_string(status)
-    };
+  auto ec {static_cast<int>(exit_code::out_of_range)};
+  if (siginfo_t siginfo; ::waitid(P_PIDFD, pid_fd, &siginfo, WEXITED) == 0) {
+    ec = siginfo.si_code == CLD_EXITED ? siginfo.si_status :
+      static_cast<int>(exit_code::signaled) + siginfo.si_status;
   }
 
-  return WEXITSTATUS(status);
+  ::close(pid_fd);
+  return ec;
 }
 
 inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
 {
-  if (pid <= 0) [[unlikely]]
-    throw std::invalid_argument {"pid should be positive to specify exact one process: " + std::to_string(pid)};
-  else if (d < d.zero()) [[unlikely]]
-    throw std::invalid_argument {"duration must be positive for waiting process termination: " + std::to_string(pid)};
-
+  if (pid <= 0) [[unlikely]] throw std::invalid_argument {
+    "pid should be positive to specify exact one process: " + std::to_string(pid)};
+  else if (d < d.zero()) [[unlikely]] throw std::invalid_argument {
+      "duration must be positive for waiting process termination: " + std::to_string(pid)};
 
   sigset_t sigchld, sigold;
-  if (sigemptyset(&sigchld) || sigaddset(&sigchld, SIGCHLD) || sigprocmask(SIG_BLOCK, &sigchld, &sigold)) [[unlikely]] {
+  if (sigemptyset(&sigchld) || sigaddset(&sigchld, SIGCHLD) || pthread_sigmask(SIG_BLOCK, &sigchld, &sigold)) [[unlikely]] {
     throw std::system_error {errno, std::system_category(), "failed to prepare to wait SIGCHLD"};
   }
 
   int wait_result {};
-  siginfo_t info {};
-  info.si_pid = 0;
-  const auto begin = std::chrono::steady_clock::now();
-  while (info.si_pid != pid && !wait_result) {
-    const auto time_left {d - (std::chrono::steady_clock::now() - begin)};
-    if (time_left <= d.zero()) {
-      wait_result = -1;
-    } else {
-      const timespec timeout {
-        .tv_sec = std::chrono::duration_cast<std::chrono::seconds>(time_left).count(),
-        .tv_nsec = (time_left % std::chrono::seconds{1}).count()
-      };
-      wait_result = sigtimedwait(&sigchld, &info, &timeout);
-    }
-    if (wait_result == -1 && errno == EINTR) {
-      wait_result = 0;
-    }
-  }
+  {
+    gh4ck3r::Defer restore_signal {[&] {
+      const auto is_member {sigismember(&sigold, SIGCHLD)};
+      if (!is_member) {
+        pthread_sigmask(SIG_UNBLOCK, &sigchld, nullptr);
+      } else if (is_member < 0) {
+        throw std::system_error {errno, std::system_category(), "failed to check SIGCHLD signal"};
+      }
+    }};
 
-  const auto is_member {sigismember(&sigold, SIGCHLD)};
-  if (!is_member) {
-    sigprocmask(SIG_UNBLOCK, &sigchld, nullptr);
-  } else if (is_member < 0) {
-    throw std::system_error {errno, std::system_category(), "failed to check SIGCHLD signal"};
+    if (int status; ::waitpid(pid, &status, WNOHANG) == pid) {
+      if (WIFEXITED(status)) return WEXITSTATUS(status);
+      if (WIFSIGNALED(status)) return WTERMSIG(status)
+        + static_cast<std::underlying_type_t<exit_code>>(exit_code::signaled);
+    }
+
+    siginfo_t info {};
+    info.si_pid = 0;
+    const auto begin = std::chrono::steady_clock::now();
+    while (info.si_pid != pid && !wait_result) {
+      const auto time_left {d - (std::chrono::steady_clock::now() - begin)};
+      if (time_left <= d.zero()) {
+        wait_result = -1;
+      } else {
+        const timespec timeout {
+          .tv_sec = std::chrono::duration_cast<std::chrono::seconds>(time_left).count(),
+          .tv_nsec = (time_left % std::chrono::seconds{1}).count()
+        };
+        wait_result = sigtimedwait(&sigchld, &info, &timeout);
+      }
+      if (wait_result == -1 && errno == EINTR) {
+        wait_result = 0;
+      }
+    }
   }
 
   if (wait_result < 0) {

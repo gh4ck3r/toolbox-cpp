@@ -93,6 +93,7 @@ TEST(process_exec, wait_timeout)
   using gh4ck3r::process::ppidof;
   using gh4ck3r::process::wait;
   using gh4ck3r::process::wait_for;
+  using gh4ck3r::process::exit_code;
 
   const auto pid = execute("/bin/sleep", 2);
   ASSERT_GE(pid, 0);
@@ -101,7 +102,7 @@ TEST(process_exec, wait_timeout)
   EXPECT_THROW(wait_for(pid, 100ms), gh4ck3r::process::timeout_error);
 
   ::kill(pid, SIGKILL);
-  EXPECT_THROW(wait(pid), std::runtime_error) << "should be killed by SIGKILL";
+  EXPECT_EQ(wait(pid), static_cast<int>(exit_code::signaled) + SIGKILL ) << "should be killed by SIGKILL";
 }
 
 struct EnvTest : ::testing::Test {

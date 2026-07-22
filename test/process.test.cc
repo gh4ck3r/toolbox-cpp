@@ -12,7 +12,6 @@ using namespace gh4ck3r::process;
 
 TEST(process_info, nameof)
 {
-  using gh4ck3r::process::nameof;
   EXPECT_EQ(nameof(getpid()), path_t{__FILE_NAME__}.stem());
 
   ASSERT_EQ(read_symlink(path_t{"/sbin/init"}).filename(), "systemd");
@@ -21,7 +20,6 @@ TEST(process_info, nameof)
 
 TEST(process_info, cmdof)
 {
-  using gh4ck3r::process::cmdof;
   const auto cmd {cmdof(getpid())};
   EXPECT_FALSE(cmd.front().empty());
 
@@ -32,9 +30,6 @@ TEST(process_info, cmdof)
 
 TEST(process_info, execof)
 {
-  using gh4ck3r::process::execof;
-  using gh4ck3r::process::is_executable;
-
   const auto executable { execof(getpid()) };
   EXPECT_TRUE(is_executable(executable));
 
@@ -44,7 +39,6 @@ TEST(process_info, execof)
 
 TEST(process_info, exists)
 {
-  using gh4ck3r::process::exists;
   EXPECT_TRUE(exists(getpid()));
   EXPECT_TRUE(exists(getppid()));
   EXPECT_THROW(exists(0), std::invalid_argument);
@@ -52,10 +46,6 @@ TEST(process_info, exists)
 
 TEST(process_exec, simple)
 {
-  using gh4ck3r::process::execute;
-  using gh4ck3r::process::ppidof;
-  using gh4ck3r::process::wait;
-
   const auto pid = execute("/bin/true");
   ASSERT_GE(pid, 0);
   EXPECT_EQ(ppidof(pid), getpid());
@@ -65,10 +55,6 @@ TEST(process_exec, simple)
 
 TEST(process_exec, redirect_stdout)
 {
-  using gh4ck3r::process::execute;
-  using gh4ck3r::process::ppidof;
-  using gh4ck3r::process::wait;
-
   int pipefd[2];
   ASSERT_NE(pipe2(pipefd, O_CLOEXEC), -1);
 
@@ -89,17 +75,11 @@ TEST(process_exec, redirect_stdout)
 
 TEST(process_exec, wait_timeout)
 {
-  using gh4ck3r::process::execute;
-  using gh4ck3r::process::ppidof;
-  using gh4ck3r::process::wait;
-  using gh4ck3r::process::wait_for;
-  using gh4ck3r::process::exit_code;
-
   const auto pid = execute("/bin/sleep", 2);
   ASSERT_GE(pid, 0);
 
   using namespace std::chrono_literals;
-  EXPECT_THROW(wait_for(pid, 100ms), gh4ck3r::process::timeout_error);
+  EXPECT_THROW(wait_for(pid, 100ms), timeout_error);
 
   ::kill(pid, SIGKILL);
   EXPECT_EQ(wait(pid), static_cast<int>(exit_code::signaled) + SIGKILL ) << "should be killed by SIGKILL";

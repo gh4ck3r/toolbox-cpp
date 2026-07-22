@@ -10,11 +10,18 @@
 #include <stdexcept>
 #include <vector>
 #include <csignal>
+#include <gh4ck3r/defer.hh>
+
+extern "C" {
+#include <fcntl.h>
 #include <unistd.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <sys/pidfd.h>
 #include <sys/syscall.h>
-#include <gh4ck3r/defer.hh>
+
+extern "C" char **environ;
+}
 
 namespace gh4ck3r::process {
 
@@ -36,7 +43,7 @@ class Argv : protected std::vector<std::string> {
   inline operator argv_t() const {
     ptrs_.clear();
     ptrs_.reserve(size());
-    transform(begin(), end(), back_inserter(ptrs_),
+    std::transform(begin(), end(), std::back_inserter(ptrs_),
                    [] (auto &s) { return s.data(); });
     ptrs_.push_back(nullptr);
 
@@ -51,7 +58,7 @@ class Env : protected std::map<std::string, std::string> {
 
  public:
   Env(char *const * envp = environ) {
-    if (!envp) return;
+    if (!envp || !*envp) return;
 
     std::string_view env {*envp};
     while (!env.empty()) {
@@ -76,13 +83,13 @@ class Env : protected std::map<std::string, std::string> {
 
     const auto siz = size();
     buf_.reserve(siz);
-    transform(begin(), end(), back_inserter(buf_),
-              [] (auto &kv) { return kv.first + '=' + kv.second; });
+    std::transform(begin(), end(), std::back_inserter(buf_),
+                   [] (auto &kv) { return kv.first + '=' + kv.second; });
 
     ptrs_.clear();
     ptrs_.reserve(siz + 1);
-    transform(buf_.begin(), buf_.end(), back_inserter(ptrs_),
-              [] (auto &s) { return s.data(); });
+    std::transform(buf_.begin(), buf_.end(), std::back_inserter(ptrs_),
+                   [] (auto &s) { return s.data(); });
     ptrs_.emplace_back(nullptr);
 
     return const_cast<envp_t>(ptrs_.data());
@@ -94,7 +101,7 @@ inline path_t operator/(const path_t &path, pid_t pid) {
 }
 
 inline bool is_executable(const path_t &path) {
-  return access(path.c_str(), F_OK | X_OK) == 0;
+  return ::faccessat(AT_FDCWD, path.c_str(), F_OK | X_OK, AT_EACCESS) == 0;
 }
 
 inline bool exists(pid_t pid) {
@@ -125,7 +132,8 @@ inline void set_stdio(int in_fd, int out_fd, int err_fd) {
       };
     }
 
-    if (std::find(close_fds.begin(), close_fds.end(), from) == close_fds.end()) {
+    if (STDERR_FILENO < from &&
+        std::find(close_fds.begin(), close_fds.end(), from) == close_fds.end()) {
       close_fds.emplace_back(from);
     }
   }
@@ -159,7 +167,7 @@ inline path_t execof(pid_t pid)
   } catch (const std::system_error &e) {
     // This could happen if the proc entry is about kernel thread or thread, its
     // parent is already terminated.
-    if (e.code().value() != ENOENT) throw;
+    if (e.code() != std::errc::no_such_file_or_directory) throw;
   }
   return path;
 }
@@ -198,9 +206,9 @@ inline void exit(exit_code ec) { std::exit(static_cast<int>(ec)); }
 
 /// This is a just simple wrapper around fork/exec.
 [[nodiscard("A caller is responsible for waiting for the child process")]]
-inline pid_t execute(const int stdin,
-                     const int stdout,
-                     const int stderr,
+inline pid_t execute(const int stdin_fd,
+                     const int stdout_fd,
+                     const int stderr_fd,
                      const path_t &file,
                      const Argv &argv = {},
                      const Env  &envp = environ)
@@ -210,15 +218,15 @@ inline pid_t execute(const int stdin,
 
   const auto pid {fork()};
   if (pid == 0) try {
-    set_stdio(stdin, stdout, stderr);
+    set_stdio(stdin_fd, stdout_fd, stderr_fd);
     execve(file, argv.size() ? argv : Argv {file.c_str()}, envp);
   } catch (const std::exception &e) {
-    if (0 < stderr) {
+    if (0 < stderr_fd) {
       ::dprintf(STDERR_FILENO, "exception while execute child process: %s\n", e.what());
     }
     ::_exit(static_cast<int>(exit_code::invalid));
   } catch (...) {
-    if (0 < stderr) {
+    if (0 < stderr_fd) {
       ::dprintf(STDERR_FILENO, "unknown exception while execute child process\n");
     }
     ::_exit(static_cast<int>(exit_code::invalid));
@@ -248,18 +256,18 @@ std::string stringify(T&& val) {
 template <typename FIRST, typename...REST>
 requires (!std::is_same_v<Argv, std::decay_t<FIRST>>)
 [[nodiscard("A caller is responsible for waiting for the child process")]]
-pid_t execute(const int stdin,
-              const int stdout,
-              const int stderr,
+pid_t execute(const int stdin_fd,
+              const int stdout_fd,
+              const int stderr_fd,
               const path_t &file,
               FIRST&& first,
               REST&&...rest) {
-  return execute(stdin, stdout, stderr,
+  return execute(stdin_fd, stdout_fd, stderr_fd,
                  file,
                  Argv {
                   file.c_str(),
-                  detail::stringify(std::forward<FIRST>(first)).c_str(),
-                  (detail::stringify(std::forward<REST>(rest)).c_str())...
+                  detail::stringify(std::forward<FIRST>(first)),
+                  (detail::stringify(std::forward<REST>(rest)))...
                  });
 }
 
@@ -290,7 +298,7 @@ class timeout_error : public std::runtime_error {
 
 inline int wait(const pid_t pid)
 {
-  const auto pid_fd {::syscall(SYS_pidfd_open, pid, 0)};
+  const auto pid_fd {pidfd_open(pid, 0)};
   if (pid_fd == -1) [[unlikely]] throw std::system_error {
     errno, std::system_category(), "failed to open pidfd" };
 
@@ -311,52 +319,25 @@ inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
   else if (d < d.zero()) [[unlikely]] throw std::invalid_argument {
       "duration must be positive for waiting process termination: " + std::to_string(pid)};
 
-  sigset_t sigchld, sigold;
-  if (sigemptyset(&sigchld) || sigaddset(&sigchld, SIGCHLD) || pthread_sigmask(SIG_BLOCK, &sigchld, &sigold)) [[unlikely]] {
-    throw std::system_error {errno, std::system_category(), "failed to prepare to wait SIGCHLD"};
+  const auto pid_fd {pidfd_open(pid, 0)};
+  if (pid_fd == -1) [[unlikely]] {
+    if (errno == ESRCH) return wait(pid);
+    throw std::system_error {errno, std::system_category(), "failed to open pidfd"};
   }
+  gh4ck3r::Defer close_fd {[&] { ::close(pid_fd); }};
 
-  int wait_result {};
-  {
-    gh4ck3r::Defer restore_signal {[&] {
-      const auto is_member {sigismember(&sigold, SIGCHLD)};
-      if (!is_member) {
-        pthread_sigmask(SIG_UNBLOCK, &sigchld, nullptr);
-      } else if (is_member < 0) {
-        throw std::system_error {errno, std::system_category(), "failed to check SIGCHLD signal"};
-      }
-    }};
+  struct pollfd pfd {
+    .fd = static_cast<int>(pid_fd),
+    .events = POLLIN,
+    .revents = 0,
+  };
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
 
-    if (int status; ::waitpid(pid, &status, WNOHANG) == pid) {
-      if (WIFEXITED(status)) return WEXITSTATUS(status);
-      if (WIFSIGNALED(status)) return WTERMSIG(status)
-        + static_cast<std::underlying_type_t<exit_code>>(exit_code::signaled);
-    }
-
-    siginfo_t info {};
-    info.si_pid = 0;
-    const auto begin = std::chrono::steady_clock::now();
-    while (info.si_pid != pid && !wait_result) {
-      const auto time_left {d - (std::chrono::steady_clock::now() - begin)};
-      if (time_left <= d.zero()) {
-        wait_result = -1;
-      } else {
-        const timespec timeout {
-          .tv_sec = std::chrono::duration_cast<std::chrono::seconds>(time_left).count(),
-          .tv_nsec = (time_left % std::chrono::seconds{1}).count()
-        };
-        wait_result = sigtimedwait(&sigchld, &info, &timeout);
-      }
-      if (wait_result == -1 && errno == EINTR) {
-        wait_result = 0;
-      }
-    }
-  }
-
-  if (wait_result < 0) {
+  const auto ret = ::poll(&pfd, 1, ms);
+  if (ret == 0) {
     throw timeout_error {pid, d};
-  } else if (wait_result != SIGCHLD) {
-    throw std::runtime_error {"unexpected signal (not SIGCHLD) is got: " + std::to_string(wait_result)};
+  } else if (ret < 0) {
+    throw std::system_error {errno, std::system_category(), "failed to poll pidfd"};
   }
 
   return wait(pid);
@@ -372,7 +353,12 @@ inline pid_t ppidof(const pid_t pid)
 
   char state;
   pid_t ppid = {};
-  std::istringstream {line.substr(line.find_last_of(')')+1)} >> state >> ppid;
+  // man proc_pid_stat
+  const auto pos = line.find_last_of(')');
+  if (pos == std::string::npos) [[unlikely]] throw std::runtime_error {
+    "invalid /proc/" + std::to_string(pid) + "/stat format: closing parenthesis not found"};
+
+  std::istringstream {line.substr(pos + 1)} >> state >> ppid;
   return ppid;
 }
 

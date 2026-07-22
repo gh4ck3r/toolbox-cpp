@@ -11,7 +11,7 @@ struct Defer : protected std::function<void()> {
 
   template <class FN>
   explicit Defer(FN&& fn) : base_t(std::forward<FN>(fn)) {}
-  ~Defer() { if (*this) base_t::operator()(); }
+  ~Defer() noexcept { if (*this) try {base_t::operator()();} catch(...){} }
 
   using base_t::operator=;
 

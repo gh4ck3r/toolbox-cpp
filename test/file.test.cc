@@ -3,8 +3,6 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
-#include <fcntl.h>
-
 using namespace gh4ck3r::filesystem;
 
 TEST(is_valid, valid)

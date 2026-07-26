@@ -12,6 +12,9 @@ TEST(function_traitsTest, return_type)
 
   void foo();
   static_assert(std::is_same_v<function_trait<foo>::return_type, void>);
+
+  static_assert(std::is_same_v<function_trait<std::free>::return_type, void>);
+
 }
 
 TEST(function_traitsTest, arguments)
@@ -32,6 +35,10 @@ TEST(function_traitsTest, arguments)
   static_assert(foo_trait::arity == 0);
   static_assert(std::is_same_v<foo_trait::first_argument_type, void>);
   static_assert(std::is_same_v<foo_trait::last_argument_type, void>);
+
+  using free_trait = function_trait<std::free>;
+  static_assert(free_trait::arity == 1);
+  static_assert(std::is_same_v<free_trait::first_argument_type, void*>);
 }
 
 } // namespace gh4ck3r::metatype

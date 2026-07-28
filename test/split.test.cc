@@ -86,4 +86,42 @@ TEST(split, multi_sep)
   EXPECT_EQ(values3[3], "8");
 }
 
+TEST(split, escape_sep)
+{
+  const auto values = split<',', '\\'>(R"(1,2,3\,4)");
+  ASSERT_EQ(values.size(), 3);
+  EXPECT_EQ(values[0], "1");
+  EXPECT_EQ(values[1], "2");
+  EXPECT_EQ(values[2], R"(3\,4)");
+}
+
+TEST(split, escape_sep1)
+{
+  const auto values = split<',', '\\'>(R"(1,2,3,4)");
+  ASSERT_EQ(values.size(), 4);
+  EXPECT_EQ(values[0], "1");
+  EXPECT_EQ(values[1], "2");
+  EXPECT_EQ(values[2], "3");
+  EXPECT_EQ(values[3], "4");
+}
+
+TEST(split, escape_sep2)
+{
+  const auto values = split<',', '\\'>(R"(1,2,3\\,4)");
+  ASSERT_EQ(values.size(), 4);
+  EXPECT_EQ(values[0], "1");
+  EXPECT_EQ(values[1], "2");
+  EXPECT_EQ(values[2], R"(3\\)");
+  EXPECT_EQ(values[3], "4");
+}
+
+TEST(split, escape_sep3)
+{
+  const auto values = split<',', '\\'>(R"(\1,2\\,3\\\,4\)");
+  ASSERT_EQ(values.size(), 3);
+  EXPECT_EQ(values[0], R"(\1)");
+  EXPECT_EQ(values[1], R"(2\\)");
+  EXPECT_EQ(values[2], R"(3\\\,4\)");
+}
+
 } //  namespace gh4ck3r

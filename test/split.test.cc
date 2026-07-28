@@ -40,6 +40,30 @@ TEST(split, null_sep)
   EXPECT_EQ(values.front(), str);
 }
 
+TEST(split, beginning_sep)
+{
+  constexpr std::string_view str {",1,2,3,4"};
+  const auto values = split<','>(str);
+  EXPECT_EQ(values.size(), 5);
+  EXPECT_TRUE(values.front().empty());
+  EXPECT_EQ(values[1], "1");
+  EXPECT_EQ(values[2], "2");
+  EXPECT_EQ(values[3], "3");
+  EXPECT_EQ(values[4], "4");
+}
+
+TEST(split, ending_sep)
+{
+  constexpr std::string_view str {"1,2,3,4,"};
+  const auto values = split<','>(str);
+  EXPECT_EQ(values.size(), 5);
+  EXPECT_EQ(values[0], "1");
+  EXPECT_EQ(values[1], "2");
+  EXPECT_EQ(values[2], "3");
+  EXPECT_EQ(values[3], "4");
+  EXPECT_TRUE(values.back().empty());
+}
+
 TEST(split, multi_sep)
 {
   const auto values = split<','>("1,2,3,4|5/6/7/8");

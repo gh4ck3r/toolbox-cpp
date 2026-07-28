@@ -5,30 +5,39 @@
 #include "function_traits.hh"
 #include "type_traits.hh"
 
-namespace gh4ck3r {
+namespace gh4ck3r::reaper {
+
+namespace detail {
 
 using metatype::function_trait;
 
 template <auto Deleter>
 requires (function_trait<Deleter>::arity == 1)
-struct resource_of {
-  using type = function_trait<Deleter>::first_argument_type;
-  static inline constexpr type invalid_value() { return {}; }
-};
+using resource_t = function_trait<Deleter>::first_argument_type;
 
 template <auto Deleter>
-requires (function_trait<Deleter>::arity == 1)
+constexpr resource_t<Deleter> invalid_value()
+{
+  if constexpr (std::is_same_v<int, resource_t<Deleter>>)
+    return -1;
+
+  return {};
+}
+
+} // namespace detail
+
+template <auto Deleter,
+          detail::resource_t<Deleter> INVALID = detail::invalid_value<Deleter>()>
 class Reaper {
-  using resource_type = resource_of<Deleter>::type;
-  static inline constexpr auto invalid_ = resource_of<Deleter>::invalid_value();
+  using resource_type = detail::resource_t<Deleter>;
   resource_type resource_;
 
-  inline void reset(resource_type r = invalid_) {
-    if (resource_ != invalid_) Deleter(std::exchange(resource_, r));
+  inline void reset(resource_type r = INVALID) {
+    if (resource_ != INVALID) Deleter(std::exchange(resource_, r));
   }
  public:
-  Reaper(resource_type &&r) : resource_ (std::exchange(r, invalid_)) {
-    if (resource_ == invalid_) [[unlikely]] {
+  Reaper(resource_type &&r) : resource_ (std::exchange(r, INVALID)) {
+    if (resource_ == INVALID) [[unlikely]] {
       if (errno) throw std::system_error {errno, std::system_category(),
           "Reaper:failed to acquire resource"};
 
@@ -37,10 +46,10 @@ class Reaper {
   }
 
   inline Reaper &operator=(resource_type &&r) {
-    if (r == invalid_)
+    if (r == INVALID)
       throw std::invalid_argument {"Reaper: assigning invalid resource"};
 
-    reset(std::exchange(r, invalid_));
+    reset(std::exchange(r, INVALID));
 
     return *this;
   }
@@ -49,13 +58,13 @@ class Reaper {
 
   [[nodiscard]]
   inline resource_type release() {
-    return std::exchange(resource_, invalid_);
+    return std::exchange(resource_, INVALID);
   }
 
   inline resource_type operator->() const
   requires (std::is_pointer_v<resource_type> && metatype::is_complete_v<std::remove_pointer_t<resource_type>> ) {
     return resource_; }
-  operator bool () const { return resource_ != invalid_; }
+  operator bool () const { return resource_ != INVALID; }
 
   inline operator resource_type () const { return resource_; }
 
@@ -72,10 +81,6 @@ class Reaper {
   Reaper &operator=(const resource_type &) = delete;
 };
 
-// XXX: I don't like this
-template <>
-inline constexpr int resource_of<::close>::invalid_value() { return -1; }
-
 Reaper(FILE*) -> Reaper<std::fclose>;
 
-} // namespace gh4ck3r
+} // namespace gh4ck3r::reaper

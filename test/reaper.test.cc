@@ -2,7 +2,7 @@
 #include "gh4ck3r/reaper.hh"
 #include <gmock/gmock.h>
 
-using gh4ck3r::Reaper;
+using gh4ck3r::reaper::Reaper;
 
 TEST(Reaper, fopen)
 {
@@ -72,7 +72,13 @@ TEST(Reaper, malloc_reassign)
 TEST(Reaper, open)
 {
   ASSERT_EQ(::open(__FILE__, O_DIRECTORY), -1);
-  EXPECT_THROW(Reaper<::close>{::open(__FILE__, O_DIRECTORY)},
+  EXPECT_THROW((Reaper<::close>{::open(__FILE__, O_DIRECTORY)}),
                std::system_error);
 }
 
+TEST(Reaper, invalid_value)
+{
+  using gh4ck3r::reaper::detail::invalid_value;
+  static_assert(invalid_value<::fclose>() == nullptr);
+  static_assert(invalid_value<::close>() == -1);
+}

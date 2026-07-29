@@ -44,6 +44,7 @@ add_unittest(network.test.cc)
 add_unittest(mnl.test.cc)
 add_unittest(process.test.cc)
 add_unittest(reaper.test.cc)
+add_unittest(hash.test.cc)
 
 if(TARGET httplib::httplib)
   add_unittest(http.test.cc)

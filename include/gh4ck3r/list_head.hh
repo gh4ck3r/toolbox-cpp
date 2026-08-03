@@ -16,7 +16,7 @@ template <typename T>
 struct container_of;
 
 template <typename T>
-using container_of_t = container_of<T>::type;
+using container_of_t = typename container_of<T>::type;
 
 template <typename ClassType, typename MemberType>
 struct container_of<MemberType ClassType::*> {
@@ -24,8 +24,8 @@ struct container_of<MemberType ClassType::*> {
   using type = ClassType;
 };
 
-template <auto Member, typename T = detail::container_of_t<decltype(Member)>>
-static constexpr size_t offset_of() {
+template <auto Member, typename T = typename detail::container_of_t<decltype(Member)>>
+static size_t offset_of() {
   return reinterpret_cast<size_t>(&(reinterpret_cast<T*>(0)->*Member));
 }
 
@@ -41,12 +41,10 @@ constexpr void list_add_tail (list_head &new_node, list_head &head) {
 template <typename C, auto Member>
 struct list_node_binder { C &c_; };
 
-template <typename C, auto Member = &C::list>
-requires (Member == &C::list)
+template <typename C, list_head C::*Member = &C::list>
 constexpr auto list_node(C &c) { return list_node_binder<C, Member>{c}; }
 
-template <typename C, auto Member = &C::value_type::list>
-requires (Member == &C::value_type::list)
+template <typename C, list_head C::value_type::*Member = &C::value_type::list>
 constexpr auto list_node(C &c) { return list_node_binder<C, Member>{c}; }
 
 template <auto Member, typename C>
@@ -150,7 +148,7 @@ class list_head_iterator {
 
 inline namespace v3 {
 
-template <typename T, auto Member = &T::list>
+template <typename T, list_head T::* Member = &T::list>
 auto list_head_iterator(list_head &head) {
   return v2::list_head_iterator<Member, T>(head);
 }

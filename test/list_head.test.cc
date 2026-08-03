@@ -9,7 +9,7 @@ struct list_head_test : ::testing::Test {
       list_head list;
   };
 
-  constexpr auto make_nodes() {
+  auto make_nodes() {
     std::array nodes {
       Node {1, "First node", {}},
       Node {2, "Second node", {}},
@@ -25,7 +25,7 @@ struct list_head_test : ::testing::Test {
       list_head link;
   };
 
-  constexpr auto make_custom_nodes() {
+  auto make_custom_nodes() {
     std::array nodes {
       CustomNode {1, "First node", {}},
       CustomNode {2, "Second node", {}},

@@ -32,7 +32,10 @@ inline bool is_valid(const fd_t fd) {
 
 class unique_fd {
  public:
-  unique_fd(fd_t fd) : fd_(fd) {}
+  unique_fd(fd_t fd) : fd_(fd) {
+    if (!is_valid(fd_)) throw std::invalid_argument {
+      "unique_fd: invalid fd: " + std::to_string(fd_)};
+  }
   unique_fd(unique_fd&& uf) { *this = std::move(uf); }
   unique_fd& operator=(unique_fd&& rhs) {
     close(std::exchange(rhs.fd_, uninitialized));
@@ -44,7 +47,7 @@ class unique_fd {
   unique_fd(const unique_fd&) = delete;
   unique_fd& operator=(const unique_fd&) = delete;
 
-  inline operator int() const { return fd_; }
+  inline operator fd_t() const { return fd_; }
   inline operator bool() const { return is_valid(fd_); }
 
  private:

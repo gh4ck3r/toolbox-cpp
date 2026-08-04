@@ -41,6 +41,11 @@ TEST(unique_fd, basic)
   EXPECT_FALSE(is_valid(fd));
 }
 
+TEST(unique_fd, empty)
+{
+  EXPECT_THROW(unique_fd {-1}, std::invalid_argument);
+}
+
 TEST(create_tempfile, default)
 {
   const auto [fd, path] = create_tempfile();

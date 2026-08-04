@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <vector>
 #include <csignal>
-#include <gh4ck3r/defer.hh>
+#include <gh4ck3r/file.hh>
 
 extern "C" {
 #include <fcntl.h>
@@ -296,19 +296,30 @@ class timeout_error : public std::runtime_error {
   const std::chrono::nanoseconds duration_;
 };
 
+inline filesystem::unique_fd pidfd_open(pid_t pid, unsigned int flags)
+{
+  auto fd = ::pidfd_open(pid, flags);
+  if (fd == -1) [[unlikely]] {
+    if (errno == ESRCH) return ::waitpid(pid, nullptr, 0);
+    throw std::system_error { errno, std::system_category(),
+      "pidfd_open: failed to open " + std::to_string(pid)};
+  }
+
+  return {fd};
+}
+
 inline int wait(const pid_t pid)
 {
   const auto pid_fd {pidfd_open(pid, 0)};
-  if (pid_fd == -1) [[unlikely]] throw std::system_error {
-    errno, std::system_category(), "failed to open pidfd" };
 
   auto ec {static_cast<int>(exit_code::out_of_range)};
-  if (siginfo_t siginfo; ::waitid(P_PIDFD, pid_fd, &siginfo, WEXITED) == 0) {
+  if (siginfo_t siginfo;
+      ::waitid(P_PIDFD, static_cast<int>(pid_fd), &siginfo, WEXITED) == 0)
+  {
     ec = siginfo.si_code == CLD_EXITED ? siginfo.si_status :
       static_cast<int>(exit_code::signaled) + siginfo.si_status;
   }
 
-  ::close(pid_fd);
   return ec;
 }
 
@@ -317,17 +328,12 @@ inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
   if (pid <= 0) [[unlikely]] throw std::invalid_argument {
     "pid should be positive to specify exact one process: " + std::to_string(pid)};
   else if (d < d.zero()) [[unlikely]] throw std::invalid_argument {
-      "duration must be positive for waiting process termination: " + std::to_string(pid)};
+    "duration must be positive for waiting process termination: " + std::to_string(pid)};
 
-  const auto pid_fd {pidfd_open(pid, 0)};
-  if (pid_fd == -1) [[unlikely]] {
-    if (errno == ESRCH) return wait(pid);
-    throw std::system_error {errno, std::system_category(), "failed to open pidfd"};
-  }
-  gh4ck3r::Defer close_fd {[&] { ::close(pid_fd); }};
+  const filesystem::unique_fd pid_fd {pidfd_open(pid, 0)};
 
   struct pollfd pfd {
-    .fd = static_cast<int>(pid_fd),
+    .fd = pid_fd,
     .events = POLLIN,
     .revents = 0,
   };

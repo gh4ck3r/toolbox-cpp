@@ -20,13 +20,20 @@ set_property(TARGET gh4ck3r APPEND PROPERTY PUBLIC_HEADER
   include/gh4ck3r/base64.hh
   include/gh4ck3r/concat.hh
   include/gh4ck3r/defer.hh
+  include/gh4ck3r/file.hh
+  include/gh4ck3r/function_traits.hh
+  include/gh4ck3r/hash.hh
   include/gh4ck3r/hexdump.hh
   include/gh4ck3r/lazygetter.hh
+  include/gh4ck3r/list_head.hh
   include/gh4ck3r/logger.hh
+  include/gh4ck3r/process.hh
+  include/gh4ck3r/reaper.hh
   include/gh4ck3r/recipe.hh
-  include/gh4ck3r/type_traits.hh
-  include/gh4ck3r/typemap.hh
   include/gh4ck3r/singleton.hh
+  include/gh4ck3r/split.hh
+  include/gh4ck3r/typemap.hh
+  include/gh4ck3r/type_traits.hh
 )
 
 target_compile_features(gh4ck3r INTERFACE cxx_std_20)

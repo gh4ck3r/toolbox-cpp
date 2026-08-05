@@ -71,3 +71,61 @@ TEST(hash, unordered_map)
   s.insert({{"foo", 10, "Foo"}, "third"});
   EXPECT_EQ(s.size(), 2);
 }
+
+enum class Level { low, medium, high };
+std::ostream &operator<<(std::ostream &os, const Level &l) {
+  switch (l) {
+    case Level::low: return os << "low";
+    case Level::medium: return os << "medium";
+    case Level::high: return os << "high";
+  }
+  return os;
+}
+
+struct Tag {
+  std::string type;
+  std::unordered_set<Level> levels;
+};
+
+bool operator==(const Tag &lhs, const Tag &rhs)
+{
+  return lhs.type == rhs.type
+      && lhs.levels == rhs.levels;
+}
+
+template <>
+struct std::hash<Tag> {
+  std::size_t operator()(const Tag &t) const noexcept {
+    return gh4ck3r::unordered_hash_combine(t.levels) ^
+        gh4ck3r::hash_combine(t.type);
+  }
+};
+
+TEST(hash, unordered_set_enum)
+{
+  using enum Level;
+  std::unordered_set<Tag> tags {
+    {"foo", {}},
+  };
+
+  auto [_, inserted] = tags.insert({"foo", {}});
+  EXPECT_FALSE(inserted);
+
+  std::tie(_, inserted) = tags.insert({"foo", {low}});
+  EXPECT_TRUE(inserted);
+
+  std::tie(_, inserted) = tags.insert({"foo", {low}});
+  EXPECT_FALSE(inserted);
+
+  std::tie(_, inserted) = tags.insert({"foo", {low, low}});
+  EXPECT_FALSE(inserted);
+
+  std::tie(_, inserted) = tags.insert({"foo", {low, low, low}});
+  EXPECT_FALSE(inserted);
+
+  std::tie(_, inserted) = tags.insert({"foo", {low, medium}});
+  EXPECT_TRUE(inserted);
+
+  std::tie(_, inserted) = tags.insert({"foo", {medium, low, medium, low}});
+  EXPECT_FALSE(inserted);
+}

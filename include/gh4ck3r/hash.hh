@@ -11,4 +11,12 @@ inline constexpr std::size_t hash_combine(const ARGS&...args) {
   return seed;
 }
 
+template <template <typename...> typename C, typename...ARGS>
+inline constexpr std::size_t unordered_hash_combine(const C<ARGS...> &c) {
+  std::size_t seed = 0;
+  const std::hash<typename C<ARGS...>::value_type> h{};
+  for (auto &e : c) seed ^= h(e);
+  return seed;
+}
+
 } // namespace gh4ck3r

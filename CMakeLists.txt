@@ -65,6 +65,9 @@ if(OpenSSL_FOUND)
   link_libraries(gh4ck3r OpenSSL::Crypto)
 endif()
 
+find_package(asio REQUIRED)
+target_link_libraries(gh4ck3r INTERFACE asio::asio)
+
 set_target_properties(gh4ck3r PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}

@@ -17,7 +17,8 @@ TEST(typemapTest, typedef_by_unsigned)
 
 TEST(typemapTest, typedef_by_enum)
 {
-  enum color { red, green, blue };
+  enum class color { red, green, blue };
+  using enum color;
 
   static_assert(is_typedef_v<typedef_t<red, int>>);
   static_assert(is_typedef_v<typedef_t<green, float>>);

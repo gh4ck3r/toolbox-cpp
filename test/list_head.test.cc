@@ -33,6 +33,25 @@ struct list_head_test : ::testing::Test {
     };
     return nodes;
   }
+
+  struct NestedNode {
+    int id;
+    std::string name;
+    struct InnerNode {
+      int subid;
+      std::string alias;
+      list_head list;
+    } details;
+  };
+
+  auto make_nested_nodes() {
+    std::array nodes {
+      NestedNode {1, "First node",  {0x10, "one"}},
+      NestedNode {2, "Second node", {0x20, "two"}},
+      NestedNode {3, "Third node",  {0x40, "three"}},
+    };
+    return nodes;
+  }
 };
 
 TEST_F(list_head_test, list_node)
@@ -194,8 +213,8 @@ TEST_F(list_head_test, iterator_v3)
   for (auto& node : iter2) {
     EXPECT_EQ(&(*arr_iter++), &node);
   }
-
 }
+
 TEST_F(list_head_test, iterator_v3_custom)
 {
   auto nodes = make_custom_nodes();
@@ -208,6 +227,28 @@ TEST_F(list_head_test, iterator_v3_custom)
 
   auto arr_iter = nodes.begin();
   for (auto& node : list_head_iterator<&CustomNode::link>(head)) {
+    EXPECT_EQ(&(*arr_iter++), &node);
+  }
+}
+
+TEST_F(list_head_test, nested_node)
+{
+  auto nodes = make_nested_nodes();
+
+  using namespace gh4ck3r::c_compat;
+
+  list_head head {&head, &head};
+  detail::list_add_tail(nodes[0].details.list, head);
+  detail::list_add_tail(nodes[1].details.list, head);
+  detail::list_add_tail(nodes[2].details.list, head);
+
+  auto arr_iter = nodes.begin();
+  for (auto& node : list_head_iterator<NestedNode, offsetof(NestedNode, details.list)>(head)) {
+    EXPECT_EQ(&(*arr_iter++), &node);
+  }
+
+  arr_iter = nodes.begin();
+  for (auto &node : list_head_iterator<&NestedNode::details, &NestedNode::InnerNode::list>(head)) {
     EXPECT_EQ(&(*arr_iter++), &node);
   }
 }

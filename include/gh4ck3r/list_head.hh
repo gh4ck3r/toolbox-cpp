@@ -1,5 +1,6 @@
 #pragma once
 #include <iterator>
+#include <tuple>
 #include <type_traits>
 #include <cstddef>
 
@@ -24,9 +25,9 @@ struct container_of<MemberType ClassType::*> {
   using type = ClassType;
 };
 
-template <auto Member, typename T = typename detail::container_of_t<decltype(Member)>>
-static size_t offset_of() {
-  return reinterpret_cast<size_t>(&(reinterpret_cast<T*>(0)->*Member));
+template <typename T, typename R>
+static ptrdiff_t offset_of(R T::* Member) {
+  return reinterpret_cast<ptrdiff_t>(&(reinterpret_cast<T*>(0)->*Member));
 }
 
 constexpr void list_add_tail (list_head &new_node, list_head &head) {
@@ -62,7 +63,7 @@ list_head &operator<<(list_head &head, list_node_binder<C, Member> entry)
     if (!head.next) [[unlikely]] head.next = &head;
 
     auto new_node = reinterpret_cast<list_head*>(
-      reinterpret_cast<char*>(&entry.c_) + detail::offset_of<Member>());
+      reinterpret_cast<char*>(&entry.c_) + detail::offset_of(Member));
     detail::list_add_tail(*new_node, head);
   }
   return head;
@@ -70,7 +71,7 @@ list_head &operator<<(list_head &head, list_node_binder<C, Member> entry)
 
 namespace v1 {
 
-template <typename T, size_t OFFSET = offsetof(T, list)>
+template <typename T, ptrdiff_t OFFSET = offsetof(T, list)>
 class list_head_iterator {
   list_head &head_;
 
@@ -108,8 +109,24 @@ class list_head_iterator {
 } // namespace v1
 
 namespace v2 {
-template <auto Member, typename T = detail::container_of_t<decltype(Member)>>
+
+template <typename T>
+struct member_type_extractor;
+
+template <typename Class, typename Member>
+struct member_type_extractor<Member Class::*> {
+    using type = Member;
+};
+
+template <auto...NestingMembers>
 class list_head_iterator {
+  static_assert(sizeof...(NestingMembers));
+  using MemberTypes = std::tuple<decltype(NestingMembers)...>;
+  using first_t = std::tuple_element_t<0, MemberTypes>;
+  using last_t = std::tuple_element_t<sizeof...(NestingMembers)-1, MemberTypes>;
+  using last_member_type = typename member_type_extractor<last_t>::type;
+  static_assert(std::is_same_v<list_head, last_member_type>);
+
   list_head &head_;
 
  public:
@@ -120,17 +137,18 @@ class list_head_iterator {
 
    public:
     using iterator_category = std::forward_iterator_tag;
-    using value_type        = T;
+    using value_type        = detail::container_of_t<first_t>;
     using difference_type   = std::ptrdiff_t;
-    using pointer           = T*;
-    using reference         = T&;
+    using pointer           = value_type*;
+    using reference         = value_type&;
 
     Iterator() = default;
     explicit Iterator(list_head *p) : p_(p) {}
     inline reference operator*() const { return *operator->(); }
 
     inline pointer operator->() const {
-      static const auto offset = detail::offset_of<Member, T>();
+      static const auto offset = (detail::offset_of(NestingMembers) + ...);
+
       return reinterpret_cast<pointer>(reinterpret_cast<char*>(p_) - offset);
     }
     inline Iterator &operator++() { p_ = p_->next; return *this; }
@@ -148,14 +166,19 @@ class list_head_iterator {
 
 inline namespace v3 {
 
-template <typename T, list_head T::* Member = &T::list>
+template <typename T>
 auto list_head_iterator(list_head &head) {
-  return v2::list_head_iterator<Member, T>(head);
+  return v2::list_head_iterator<&T::list>(head);
 }
 
-template <auto Member, typename T = detail::container_of_t<decltype(Member)>>
+template <auto...Members>
 auto list_head_iterator(list_head &head) {
-  return v2::list_head_iterator<Member, T>(head);
+  return v2::list_head_iterator<Members...>(head);
+}
+
+template <typename T, ptrdiff_t offset>
+auto list_head_iterator(list_head &head) {
+  return v1::list_head_iterator<T, offset>(head);
 }
 
 } // namespace v3

@@ -110,8 +110,13 @@ TEST_F(list_head_test, list_container)
   ASSERT_FALSE(head.next);
 
   using gh4ck3r::c_compat::list_node;
+#if 1
+  for (auto &n : nodes1) head << list_node(n);
+  for (auto &n : nodes2) head << list_node(n);
+#else
   head  << list_node(nodes1)
         << list_node(nodes2);
+#endif
 
   ASSERT_EQ(head.prev->next, &head);
   ASSERT_EQ(head.next->prev, &head);
@@ -131,8 +136,8 @@ TEST_F(list_head_test, iterator_v1)
   auto nodes = make_nodes();
 
   list_head head {};
-  using gh4ck3r::c_compat::list_node;
-  head << list_node(nodes);
+  using gh4ck3r::c_compat::list_node_container;
+  head << list_node_container(nodes);
 
   auto arr_iter = nodes.begin();
 
@@ -147,8 +152,8 @@ TEST_F(list_head_test, iterator_v1_custom)
   auto nodes = make_custom_nodes();
 
   list_head head {};
-  using gh4ck3r::c_compat::list_node;
-  head << list_node<&CustomNode::link>(nodes);
+  using gh4ck3r::c_compat::list_node_container;
+  head << list_node_container<&CustomNode::link>(nodes);
 
   auto arr_iter = nodes.begin();
 
@@ -163,8 +168,8 @@ TEST_F(list_head_test, iterator_v2)
   auto nodes = make_nodes();
 
   list_head head {};
-  using gh4ck3r::c_compat::list_node;
-  head << list_node(nodes);
+  using gh4ck3r::c_compat::list_node_container;
+  head << list_node_container(nodes);
 
   auto arr_iter = nodes.begin();
 
@@ -179,8 +184,8 @@ TEST_F(list_head_test, iterator_v2_custom)
   auto nodes = make_custom_nodes();
 
   list_head head {};
-  using gh4ck3r::c_compat::list_node;
-  head << list_node<&CustomNode::link>(nodes);
+  using gh4ck3r::c_compat::list_node_container;
+  head << list_node_container<&CustomNode::link>(nodes);
 
   auto arr_iter = nodes.begin();
 
@@ -195,8 +200,8 @@ TEST_F(list_head_test, iterator_v3)
   auto nodes = make_nodes();
 
   list_head head {};
-  using gh4ck3r::c_compat::list_node;
-  head << list_node(nodes);
+  using gh4ck3r::c_compat::list_node_container;
+  head << list_node_container(nodes);
 
   using gh4ck3r::c_compat::v3::list_head_iterator;
   auto iter1 = list_head_iterator<Node>(head);
@@ -220,13 +225,29 @@ TEST_F(list_head_test, iterator_v3_custom)
   auto nodes = make_custom_nodes();
 
   list_head head {};
-  using gh4ck3r::c_compat::list_node;
-  head << list_node<&CustomNode::link>(nodes);
+  using gh4ck3r::c_compat::list_node_container;
+  head << list_node_container<&CustomNode::link>(nodes);
 
   using gh4ck3r::c_compat::v3::list_head_iterator;
 
   auto arr_iter = nodes.begin();
   for (auto& node : list_head_iterator<&CustomNode::link>(head)) {
+    EXPECT_EQ(&(*arr_iter++), &node);
+  }
+}
+
+TEST_F(list_head_test, nested_node_by_offset)
+{
+  auto nodes = make_nested_nodes();
+
+  using namespace gh4ck3r::c_compat;
+  list_head head {&head, &head};
+  head << list_node_container<&NestedNode::details, &NestedNode::InnerNode::list>(nodes);
+
+  constexpr auto NestedNodeList = list_head_iterator<
+      NestedNode, offsetof(NestedNode, details.list)>;
+  auto arr_iter = nodes.begin();
+  for (auto& node : NestedNodeList(head)) {
     EXPECT_EQ(&(*arr_iter++), &node);
   }
 }
@@ -238,17 +259,13 @@ TEST_F(list_head_test, nested_node)
   using namespace gh4ck3r::c_compat;
 
   list_head head {&head, &head};
-  detail::list_add_tail(nodes[0].details.list, head);
-  detail::list_add_tail(nodes[1].details.list, head);
-  detail::list_add_tail(nodes[2].details.list, head);
+  head << list_node_container<&NestedNode::details, &NestedNode::InnerNode::list>(nodes);
 
   auto arr_iter = nodes.begin();
-  for (auto& node : list_head_iterator<NestedNode, offsetof(NestedNode, details.list)>(head)) {
-    EXPECT_EQ(&(*arr_iter++), &node);
-  }
-
+  constexpr auto NestedNodeList = list_head_iterator<&NestedNode::details,
+    &NestedNode::InnerNode::list>;
   arr_iter = nodes.begin();
-  for (auto &node : list_head_iterator<&NestedNode::details, &NestedNode::InnerNode::list>(head)) {
+  for (auto &node : NestedNodeList(head)) {
     EXPECT_EQ(&(*arr_iter++), &node);
   }
 }

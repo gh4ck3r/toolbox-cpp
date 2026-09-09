@@ -30,43 +30,89 @@ static ptrdiff_t offset_of(R T::* Member) {
   return reinterpret_cast<ptrdiff_t>(&(reinterpret_cast<T*>(0)->*Member));
 }
 
-constexpr void list_add_tail (list_head &new_node, list_head &head) {
+constexpr void list_add_tail (::list_head &new_node, ::list_head &head) {
   new_node.next = &head;
   new_node.prev = head.prev;
   head.prev->next = &new_node;
   head.prev = &new_node;
 }
 
+template <typename T>
+struct member_type_extractor;
+
+template <typename Class, typename Member>
+struct member_type_extractor<Member Class::*> { using type = Member; };
+
+template <typename T>
+using member_type_extractor_t = member_type_extractor<T>::type;
+
+template <auto Member, auto...NestedMembers>
+struct list_node_binder {
+  using members_t = std::tuple<decltype(Member), decltype(NestedMembers)...>;
+
+  using first_mp_t = decltype(Member);
+  using node_type = container_of_t<first_mp_t>;
+  using last_mp_t = std::tuple_element_t<std::tuple_size_v<members_t> - 1, members_t>;
+
+  static_assert(std::is_same_v<::list_head, member_type_extractor_t<last_mp_t>>);
+};
+
+template <auto...NestedMembers>
+struct list_node_t {
+  using binder_t = list_node_binder<NestedMembers...>;
+
+  binder_t::node_type &node_;
+};
+
+template <auto...NestedMembers>
+::list_head &operator<<(::list_head &head,
+                        list_node_t<NestedMembers...> node)
+{
+  if (!head.prev) [[unlikely]] head.prev = &head;
+  if (!head.next) [[unlikely]] head.next = &head;
+
+  list_head *pn = reinterpret_cast<list_head*>(
+    reinterpret_cast<unsigned char*>(&node.node_) + (detail::offset_of(NestedMembers) + ...));
+  detail::list_add_tail(*pn, head);
+
+  return head;
+}
+
+template <typename C, auto...NestedMembers>
+struct list_node_container_t {
+  using binder_t = list_node_binder<NestedMembers...>;
+  static_assert(std::is_same_v<typename C::value_type, typename binder_t::node_type>);
+
+  C &container_;
+};
+
+template <typename C, auto...NestedMembers>
+::list_head &operator<<(::list_head &head,
+                        list_node_container_t<C, NestedMembers...> container)
+{
+  for (auto &n : container.container_) head << list_node_t<NestedMembers...>(n);
+  return head;
+}
+
 } // namespace detail
 
-template <typename C, auto Member>
-struct list_node_binder { C &c_; };
+template <auto...NestedMembers>
+constexpr auto list_node(typename detail::list_node_binder<NestedMembers...>::node_type &n) {
+  return detail::list_node_t<NestedMembers...>{n};
+}
 
-template <typename C, list_head C::*Member = &C::list>
-constexpr auto list_node(C &c) { return list_node_binder<C, Member>{c}; }
+template <typename N, ::list_head N::*M = &N::list>
+constexpr auto list_node(N &n) { return list_node<M>(n); }
 
-template <typename C, list_head C::value_type::*Member = &C::value_type::list>
-constexpr auto list_node(C &c) { return list_node_binder<C, Member>{c}; }
+template <auto...NestedMembers, typename C,
+          typename = std::enable_if_t<!!sizeof...(NestedMembers)>>
+constexpr auto list_node_container(C &c) {
+  return detail::list_node_container_t<C, NestedMembers...>{c};
+}
 
-template <auto Member, typename C>
-constexpr auto list_node(C &c) { return list_node_binder<C, Member>{c}; }
-
-template <typename C, auto Member>
-list_head &operator<<(list_head &head, list_node_binder<C, Member> entry)
-{
-  if constexpr (!std::is_same_v<C, detail::container_of_t<decltype(Member)>>) {
-    for (auto &e : entry.c_) {
-      head << list_node<Member, typename C::value_type>(e);
-    }
-  } else {
-    if (!head.prev) [[unlikely]] head.prev = &head;
-    if (!head.next) [[unlikely]] head.next = &head;
-
-    auto new_node = reinterpret_cast<list_head*>(
-      reinterpret_cast<char*>(&entry.c_) + detail::offset_of(Member));
-    detail::list_add_tail(*new_node, head);
-  }
-  return head;
+template <typename C, ::list_head C::value_type::*M = &C::value_type::list>
+constexpr auto list_node_container(C &c) {
+  return detail::list_node_container_t<C, M>{c};
 }
 
 namespace v1 {
@@ -110,23 +156,9 @@ class list_head_iterator {
 
 namespace v2 {
 
-template <typename T>
-struct member_type_extractor;
-
-template <typename Class, typename Member>
-struct member_type_extractor<Member Class::*> {
-    using type = Member;
-};
-
-template <auto...NestingMembers>
+template <auto...NestedMembers>
 class list_head_iterator {
-  static_assert(sizeof...(NestingMembers));
-  using MemberTypes = std::tuple<decltype(NestingMembers)...>;
-  using first_t = std::tuple_element_t<0, MemberTypes>;
-  using last_t = std::tuple_element_t<sizeof...(NestingMembers)-1, MemberTypes>;
-  using last_member_type = typename member_type_extractor<last_t>::type;
-  static_assert(std::is_same_v<list_head, last_member_type>);
-
+  using binder_t = detail::list_node_binder<NestedMembers...>;
   list_head &head_;
 
  public:
@@ -137,7 +169,7 @@ class list_head_iterator {
 
    public:
     using iterator_category = std::forward_iterator_tag;
-    using value_type        = detail::container_of_t<first_t>;
+    using value_type        = binder_t::node_type;
     using difference_type   = std::ptrdiff_t;
     using pointer           = value_type*;
     using reference         = value_type&;
@@ -147,7 +179,7 @@ class list_head_iterator {
     inline reference operator*() const { return *operator->(); }
 
     inline pointer operator->() const {
-      static const auto offset = (detail::offset_of(NestingMembers) + ...);
+      static const auto offset = (detail::offset_of(NestedMembers) + ...);
 
       return reinterpret_cast<pointer>(reinterpret_cast<char*>(p_) - offset);
     }

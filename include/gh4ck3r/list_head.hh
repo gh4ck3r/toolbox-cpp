@@ -9,7 +9,7 @@ struct list_head {
   list_head *next, *prev;
 };
 
-namespace gh4ck3r::c_compat {
+namespace gh4ck3r::c_compat::list_head {
 
 namespace detail {
 
@@ -26,8 +26,12 @@ struct container_of<MemberType ClassType::*> {
 };
 
 template <typename T, typename R>
-static ptrdiff_t offset_of(R T::* Member) {
-  return reinterpret_cast<ptrdiff_t>(&(reinterpret_cast<T*>(0)->*Member));
+static inline ptrdiff_t offset_of(R T::* member) {
+  alignas(T) std::byte dummy[sizeof(T)];
+  const auto *ptr = reinterpret_cast<const T*>(dummy);
+  const auto *member_ptr = &(ptr->*member);
+  return reinterpret_cast<const char *>(member_ptr)
+          - reinterpret_cast<const char *>(ptr);
 }
 
 constexpr void list_add_tail (::list_head &new_node, ::list_head &head) {
@@ -71,7 +75,7 @@ template <auto...NestedMembers>
   if (!head.prev) [[unlikely]] head.prev = &head;
   if (!head.next) [[unlikely]] head.next = &head;
 
-  list_head *pn = reinterpret_cast<list_head*>(
+  ::list_head *pn = reinterpret_cast<::list_head*>(
     reinterpret_cast<unsigned char*>(&node.node_) + (detail::offset_of(NestedMembers) + ...));
   detail::list_add_tail(*pn, head);
 
@@ -119,13 +123,13 @@ namespace v1 {
 
 template <typename T, ptrdiff_t OFFSET = offsetof(T, list)>
 class list_head_iterator {
-  list_head &head_;
+  ::list_head &head_;
 
  public:
-  explicit list_head_iterator(list_head &head) : head_(head) {}
+  explicit list_head_iterator(::list_head &head) : head_(head) {}
 
   class Iterator {
-    list_head *p_;
+    ::list_head *p_;
 
    public:
     using iterator_category = std::forward_iterator_tag;
@@ -135,7 +139,7 @@ class list_head_iterator {
     using reference         = T&;
 
     Iterator() = default;
-    explicit Iterator(list_head *p) : p_(p) {}
+    explicit Iterator(::list_head *p) : p_(p) {}
     inline reference operator*() const { return *operator->(); }
 
     inline pointer operator->() const {
@@ -159,13 +163,13 @@ namespace v2 {
 template <auto...NestedMembers>
 class list_head_iterator {
   using binder_t = detail::list_node_binder<NestedMembers...>;
-  list_head &head_;
+  ::list_head &head_;
 
  public:
-  explicit list_head_iterator(list_head &head) : head_(head) {}
+  explicit list_head_iterator(::list_head &head) : head_(head) {}
 
   class Iterator {
-    list_head *p_;
+    ::list_head *p_;
 
    public:
     using iterator_category = std::forward_iterator_tag;
@@ -175,13 +179,12 @@ class list_head_iterator {
     using reference         = value_type&;
 
     Iterator() = default;
-    explicit Iterator(list_head *p) : p_(p) {}
+    explicit Iterator(::list_head *p) : p_(p) {}
     inline reference operator*() const { return *operator->(); }
 
     inline pointer operator->() const {
-      static const auto offset = (detail::offset_of(NestedMembers) + ...);
-
-      return reinterpret_cast<pointer>(reinterpret_cast<char*>(p_) - offset);
+      return reinterpret_cast<pointer>(reinterpret_cast<char*>(p_) -
+                                       (detail::offset_of(NestedMembers) + ...));
     }
     inline Iterator &operator++() { p_ = p_->next; return *this; }
     inline Iterator operator++(int) { auto tmp = *this; ++(*this); return tmp; }
@@ -190,29 +193,87 @@ class list_head_iterator {
     inline bool operator!=(const Iterator &other) const { return p_ != other.p_; }
   };
 
-  inline Iterator begin() { return Iterator {head_.next}; }
-  inline Iterator end()   { return Iterator {&head_}; }
+  inline Iterator begin() const { return Iterator {head_.next}; }
+  inline Iterator end()   const { return Iterator {&head_}; }
 };
 
 } // namespace v2
 
-inline namespace v3 {
+namespace v3 {
 
 template <typename T>
-auto list_head_iterator(list_head &head) {
+auto list_head_iterator(::list_head &head) {
   return v2::list_head_iterator<&T::list>(head);
 }
 
 template <auto...Members>
-auto list_head_iterator(list_head &head) {
+auto list_head_iterator(::list_head &head) {
   return v2::list_head_iterator<Members...>(head);
 }
 
 template <typename T, ptrdiff_t offset>
-auto list_head_iterator(list_head &head) {
+auto list_head_iterator(::list_head &head) {
   return v1::list_head_iterator<T, offset>(head);
 }
 
 } // namespace v3
 
-} // namespace gh4ck3r::c_compat
+inline namespace v4 {
+
+static constexpr inline ::list_head empty_head_ {
+  const_cast<::list_head*>(&empty_head_),
+  const_cast<::list_head*>(&empty_head_)
+};
+
+template <auto...NestedMembers>
+class list_node_iterator {
+  using binder_t = detail::list_node_binder<NestedMembers...>;
+
+ public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type        = binder_t::node_type;
+  using difference_type   = std::ptrdiff_t;
+  using pointer           = value_type*;
+  using reference         = value_type&;
+
+  explicit list_node_iterator(const ::list_head &head = empty_head_) :
+    head_(head),
+    cur_(head_.next != &head_ ? head_.next : nullptr)
+  {}
+
+  inline reference operator*() const { return *operator->(); }
+  inline pointer operator->() const {
+      return reinterpret_cast<pointer>(reinterpret_cast<char*>(cur_) -
+                                       (detail::offset_of(NestedMembers) + ...));
+  }
+  inline list_node_iterator &operator++() {
+    cur_ = (cur_ && cur_->next != &head_) ? cur_->next : nullptr;
+    return *this;
+  }
+  inline list_node_iterator operator++(int) {
+    auto tmp = *this; ++(*this); return tmp;
+  }
+  inline bool operator==(const list_node_iterator &rhs) const {
+    return cur_ == rhs.cur_;
+  }
+  inline bool operator!=(const list_node_iterator &rhs) const {
+    return cur_ != rhs.cur_;
+  }
+
+ protected:
+  const ::list_head &head_;
+  ::list_head *cur_;
+};
+
+template <auto...NestedMembers>
+struct list_view {
+  const ::list_head &head_;
+
+  using iterator = list_node_iterator<NestedMembers...>;
+  auto begin() const { return iterator {head_}; }
+  auto end()   const { return iterator {}; }
+};
+
+} // inline namespace v4
+
+} // namespace gh4ck3r::c_compat::list_head

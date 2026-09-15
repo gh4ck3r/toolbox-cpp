@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -53,6 +55,7 @@ class Argv : protected std::vector<std::string> {
 
 class Env : protected std::map<std::string, std::string> {
   using envp_t = char *const *;
+  mutable std::mutex m_;
   mutable std::vector<std::string> buf_;
   mutable std::vector<const char *> ptrs_;
 
@@ -60,16 +63,40 @@ class Env : protected std::map<std::string, std::string> {
   Env(char *const * envp = environ) {
     if (!envp || !*envp) return;
 
-    std::string_view env {*envp};
-    while (!env.empty()) {
+    for (char * const * p = envp; p && *p; ++p) {
+      const std::string_view env {*p};
       const auto pos = env.find('=');
       if (pos == env.npos) [[unlikely]]
         throw std::invalid_argument {"Env entry should have '='" + std::string{env}};
 
       insert_or_assign(std::string{env.substr(0, pos)}, std::string{env.substr(pos + 1)});
-
-      env = (*++envp) ? *envp : std::string_view{};
     }
+  }
+
+  Env(const Env &other) {
+    std::lock_guard lk {other.m_};
+    map::operator=(other);
+  }
+
+  Env(Env &&other) noexcept {
+    std::lock_guard lk {other.m_};
+    map::operator=(std::move(other));
+  }
+
+  Env &operator=(const Env &other) {
+    if (this != &other) {
+      std::scoped_lock lk {m_, other.m_};
+      map::operator=(other);
+    }
+    return *this;
+  }
+
+  Env &operator=(Env &&other) noexcept {
+    if (this != &other) {
+      std::scoped_lock lk {m_, other.m_};
+      map::operator=(std::move(other));
+    }
+    return *this;
   }
 
   using map::begin;
@@ -79,6 +106,7 @@ class Env : protected std::map<std::string, std::string> {
   using map::operator[];
 
   inline operator envp_t() const {
+    std::lock_guard lk {m_};
     buf_.clear();
 
     const auto siz = size();
@@ -197,8 +225,8 @@ enum class exit_code : int {
   // An unrecoverable read error was detected by the shell while reading
   // commands, except from the file operand of the dot special built-in.
   invalid             = 128,
-  // A command was interrupted by a signal.
-  signaled            = 129,
+  // A command was interrupted by a signal (128 + signal_number).
+  signaled            = 128,
   out_of_range        = 255,
 };
 
@@ -251,6 +279,27 @@ std::string stringify(T&& val) {
     return ss.str();
   }
 }
+
+inline int waitpid(const pid_t pid)
+{
+  if (int status; ::waitpid(pid, &status, 0) == pid) {
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+      return static_cast<int>(exit_code::signaled) + WTERMSIG(status);
+  }
+  return static_cast<int>(exit_code::out_of_range);
+}
+
+inline int wait_fd(const filesystem::unique_fd &pid_fd)
+{
+  siginfo_t siginfo {};
+  if (::waitid(P_PIDFD, static_cast<int>(pid_fd), &siginfo, WEXITED) == 0) {
+    return siginfo.si_code == CLD_EXITED ? siginfo.si_status :
+      static_cast<int>(exit_code::signaled) + siginfo.si_status;
+  }
+  return static_cast<int>(exit_code::out_of_range);
+}
+
 } // namespace detail
 
 template <typename FIRST, typename...REST>
@@ -296,31 +345,26 @@ class timeout_error : public std::runtime_error {
   const std::chrono::nanoseconds duration_;
 };
 
-inline filesystem::unique_fd pidfd_open(pid_t pid, unsigned int flags)
+inline std::optional<filesystem::unique_fd> pidfd_open(pid_t pid, unsigned int flags)
 {
   auto fd = ::pidfd_open(pid, flags);
   if (fd == -1) [[unlikely]] {
-    if (errno == ESRCH) return ::waitpid(pid, nullptr, 0);
-    throw std::system_error { errno, std::system_category(),
-      "pidfd_open: failed to open " + std::to_string(pid)};
+    if (errno == ESRCH) return std::nullopt;
+    throw std::system_error {
+      errno,
+      std::system_category(),
+      "pidfd_open: failed to open " + std::to_string(pid)
+    };
   }
 
-  return {fd};
+  return filesystem::unique_fd{fd};
 }
 
 inline int wait(const pid_t pid)
 {
-  const auto pid_fd {pidfd_open(pid, 0)};
-
-  auto ec {static_cast<int>(exit_code::out_of_range)};
-  if (siginfo_t siginfo;
-      ::waitid(P_PIDFD, static_cast<int>(pid_fd), &siginfo, WEXITED) == 0)
-  {
-    ec = siginfo.si_code == CLD_EXITED ? siginfo.si_status :
-      static_cast<int>(exit_code::signaled) + siginfo.si_status;
-  }
-
-  return ec;
+  const auto pid_fd = pidfd_open(pid, 0);
+  if (!pid_fd) return detail::waitpid(pid);
+  return detail::wait_fd(*pid_fd);
 }
 
 inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
@@ -330,14 +374,16 @@ inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
   else if (d < d.zero()) [[unlikely]] throw std::invalid_argument {
     "duration must be positive for waiting process termination: " + std::to_string(pid)};
 
-  const filesystem::unique_fd pid_fd {pidfd_open(pid, 0)};
+  const auto pid_fd {pidfd_open(pid, 0)};
+  if (!pid_fd) return detail::waitpid(pid);
 
   struct pollfd pfd {
-    .fd = pid_fd,
+    .fd = pid_fd.value(),
     .events = POLLIN,
     .revents = 0,
   };
-  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+  if (d > d.zero() && ms == 0) ms = 1;
 
   const auto ret = ::poll(&pfd, 1, ms);
   if (ret == 0) {
@@ -346,7 +392,7 @@ inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
     throw std::system_error {errno, std::system_category(), "failed to poll pidfd"};
   }
 
-  return wait(pid);
+  return detail::wait_fd(*pid_fd);
 }
 
 inline pid_t ppidof(const pid_t pid)

@@ -36,9 +36,10 @@ class unique_fd {
     if (!is_valid(fd_)) throw std::invalid_argument {
       "unique_fd: invalid fd: " + std::to_string(fd_)};
   }
-  unique_fd(unique_fd&& uf) { *this = std::move(uf); }
-  unique_fd& operator=(unique_fd&& rhs) {
-    close(std::exchange(rhs.fd_, uninitialized));
+  unique_fd(unique_fd&& uf) noexcept : fd_{std::exchange(uf.fd_, uninitialized)} {}
+  unique_fd& operator=(unique_fd&& rhs) noexcept {
+    close(fd_);
+    fd_ = std::exchange(rhs.fd_, uninitialized);
     return *this;
   }
   ~unique_fd() noexcept { close(fd_); }

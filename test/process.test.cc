@@ -14,8 +14,12 @@ TEST(process_info, nameof)
 {
   EXPECT_EQ(nameof(getpid()), path_t{__FILE_NAME__}.stem());
 
-  ASSERT_EQ(read_symlink(path_t{"/sbin/init"}).filename(), "systemd");
-  EXPECT_EQ(nameof(1), "systemd");
+  EXPECT_FALSE(nameof(1).empty());
+  std::error_code ec;
+  if (std::filesystem::is_symlink("/sbin/init", ec)) {
+    const auto init_name = read_symlink(path_t{"/sbin/init"}).filename();
+    EXPECT_EQ(nameof(1), init_name);
+  }
 }
 
 TEST(process_info, cmdof)
@@ -79,6 +83,7 @@ TEST(process_exec, wait_timeout)
   ASSERT_GE(pid, 0);
 
   using namespace std::chrono_literals;
+  EXPECT_THROW(wait_for(pid, 500us), timeout_error);
   EXPECT_THROW(wait_for(pid, 100ms), timeout_error);
 
   ::kill(pid, SIGKILL);
@@ -115,18 +120,39 @@ TEST_F(EnvTest, iterate)
   EXPECT_EQ(cnt, 0);
 }
 
+TEST_F(EnvTest, copy_and_move)
+{
+  Env env1 {};
+  Env env2 = env1;
+  EXPECT_EQ(env2.size(), env1.size());
+
+  Env env3 = std::move(env2);
+  EXPECT_EQ(env3.size(), env1.size());
+}
+
 TEST(ppidof, malformed_name)
 {
   constexpr std::string_view malformed_name {" ) "};
+
+  int pipefd[2];
+  ASSERT_NE(pipe(pipefd), -1);
 
   const auto pid = fork();
   ASSERT_NE(pid, -1);
   if (pid == 0) {
     prctl(PR_SET_NAME, malformed_name.data());
-    exit(0);
+    ::close(pipefd[1]);
+    ::pause();
   }
-  while (nameof(pid) != malformed_name);
 
+  ::close(pipefd[1]);
+  char dummy;
+  [[maybe_unused]] auto r = ::read(pipefd[0], &dummy, 1);
+  ::close(pipefd[0]);
+
+  EXPECT_EQ(nameof(pid), malformed_name);
   EXPECT_EQ(getpid(), ppidof(pid));
-  EXPECT_EQ(wait(pid), 0);
+
+  ::kill(pid, SIGTERM);
+  EXPECT_EQ(wait(pid), static_cast<int>(exit_code::signaled) + SIGTERM);
 }

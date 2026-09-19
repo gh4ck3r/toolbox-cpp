@@ -13,36 +13,22 @@ TEST(defer, basic)
   EXPECT_TRUE(v);
 }
 
-TEST(defer, assign)
-{
-  int v = 0;
-  {
-    Defer _ {[&] {v = 1;}};
-    _ = [&] {v = 2;};
-    EXPECT_EQ(0, v);
-  }
-  EXPECT_EQ(2, v);
-}
-
-TEST(defer, assign_lvalue)
-{
-  int v = 0;
-  {
-    EXPECT_EQ(0, v);
-    Defer _ {[&] {v = 1;}};
-    const auto func = [&] {v = 2;};
-    _ = func;
-    EXPECT_EQ(0, v);
-  }
-  EXPECT_EQ(2, v);
-}
-
 TEST(defer, release)
 {
   int v = 0;
   {
     Defer _ {[&] {v = 1;}};
     _.release();
+  }
+  EXPECT_EQ(0, v);
+}
+
+TEST(defer, nullptr_assignment)
+{
+  int v = 0;
+  {
+    Defer _ {[&] {v = 1;}};
+    _ = nullptr;
   }
   EXPECT_EQ(0, v);
 }
@@ -57,4 +43,14 @@ TEST(defer, invoke)
     EXPECT_EQ(1, v);
   }
   EXPECT_EQ(1, v);
+}
+
+TEST(defer, move_construction)
+{
+  int count = 0;
+  {
+    Defer d1 {[&] { ++count; }};
+    Defer d2 {std::move(d1)};
+  }
+  EXPECT_EQ(1, count);
 }

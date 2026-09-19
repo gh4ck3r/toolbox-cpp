@@ -46,6 +46,22 @@ TEST(unique_fd, empty)
   EXPECT_THROW(unique_fd {-1}, std::invalid_argument);
 }
 
+TEST(unique_fd, self_assignment)
+{
+  const int fd = ::open(__FILE__, O_RDONLY);
+  ASSERT_NE(-1, fd);
+  {
+    unique_fd ufd { fd };
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wself-move"
+    ufd = std::move(ufd);
+    #pragma GCC diagnostic pop
+    EXPECT_TRUE(ufd);
+    EXPECT_EQ(fd, static_cast<int>(ufd));
+  }
+  EXPECT_FALSE(is_valid(fd));
+}
+
 TEST(create_tempfile, default)
 {
   const auto [fd, path] = create_tempfile();
@@ -168,6 +184,46 @@ TEST(FileWriter, default)
   ASSERT_EQ(0, ::close(pipefd[0]));
 
   EXPECT_EQ(s1, s2);
+}
+
+TEST(FileWriter, large_write)
+{
+  int pipefd[2];
+  ASSERT_EQ(0, pipe2(pipefd, O_CLOEXEC));
+
+  // Set pipe buffer size or write a buffer larger than pipe capacity (e.g. 128KB)
+  // to force multiple write calls
+  constexpr size_t data_size = 128 * 1024;
+  std::vector<uint8_t> input(data_size);
+  for (size_t i = 0; i < data_size; ++i) {
+    input[i] = static_cast<uint8_t>(i & 0xFF);
+  }
+
+  struct PipeFile : FileTrait {
+    int fd_;
+    PipeFile(int fd) : fd_(fd) {}
+    const path_t& path() const override { throw std::logic_error("no path"); }
+    fd_t fd() const override { return fd_; }
+  };
+
+  std::vector<uint8_t> output(data_size);
+  std::thread reader([&] {
+    size_t total_read = 0;
+    while (total_read < data_size) {
+      auto r = ::read(pipefd[0], output.data() + total_read, data_size - total_read);
+      if (r <= 0) break;
+      total_read += static_cast<size_t>(r);
+    }
+  });
+
+  FileWriter<PipeFile> writer{pipefd[1]};
+  EXPECT_TRUE(writer.write(input));
+  ::close(pipefd[1]);
+
+  reader.join();
+  ::close(pipefd[0]);
+
+  EXPECT_EQ(input, output);
 }
 
 TEST(AnonymousFile, basic)

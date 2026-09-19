@@ -21,8 +21,12 @@ using path_t = std::filesystem::path;
 using fd_t = int;
 
 inline bool is_valid(const fd_t fd) {
-  // fcntl returns -1 on error. If errno is EBADF, the fd is closed/invalid.
-  if (fcntl(fd, F_GETFD) != -1) return true;
+  if (fd < 0) return false;
+  int res = -1;
+  do {
+    res = ::fcntl(fd, F_GETFD);
+  } while (res == -1 && errno == EINTR);
+  if (res != -1) return true;
 
   if (errno == EBADF) return false;
 
@@ -38,8 +42,10 @@ class unique_fd {
   }
   unique_fd(unique_fd&& uf) noexcept : fd_{std::exchange(uf.fd_, uninitialized)} {}
   unique_fd& operator=(unique_fd&& rhs) noexcept {
-    close(fd_);
-    fd_ = std::exchange(rhs.fd_, uninitialized);
+    if (this != &rhs) {
+      close(fd_);
+      fd_ = std::exchange(rhs.fd_, uninitialized);
+    }
     return *this;
   }
   ~unique_fd() noexcept { close(fd_); }
@@ -53,6 +59,7 @@ class unique_fd {
 
  private:
   static inline void close(fd_t fd) noexcept {
+    if (fd < 0) return;
     int rv;
     do {
       rv = ::close(fd);
@@ -72,9 +79,17 @@ R load_file(const path_t &p) {
   else if (!is_regular_file(stat)) [[unlikely]]
     throw std::invalid_argument {"file not found: " + p.string()};
 
+  const auto sz = file_size(p);
+  R ret;
+  if constexpr (requires { ret.resize(size_t{}); }) {
+    ret.resize(sz);
+  }
   std::ifstream is {p, std::ios::binary};
-  is.unsetf(std::ios::skipws);
-  return {std::istream_iterator<uint8_t>{is}, std::istream_iterator<uint8_t>{}};
+  if (!is) throw std::system_error {errno, std::system_category(), "failed to open file: " + p.string()};
+  if (sz > 0) {
+    is.read(reinterpret_cast<char*>(ret.data()), static_cast<std::streamsize>(sz));
+  }
+  return ret;
 }
 
 inline size_t dir_siz(const path_t dir) {
@@ -164,9 +179,11 @@ class FileWriter
     while (l) {
       const auto r = ::write(fd(), p, l);
       if (r < 0) {
+        if (errno == EINTR) continue;
         std::cerr << "failed to write to file: " << std::strerror(errno);
         return false;
       }
+      p += static_cast<size_t>(r);
       l -= static_cast<size_t>(r);
     }
     return true;

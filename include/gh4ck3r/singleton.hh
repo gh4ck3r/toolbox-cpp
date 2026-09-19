@@ -48,7 +48,7 @@ class SharedSingleton : private std::shared_ptr<T> {
 
  public:
   SharedSingleton() : shared_ptr(get_instance()) {}
-  inline operator auto() const { return shared_ptr::get(); }
+  inline operator T*() const { return shared_ptr::get(); }
 
   using shared_ptr::operator->;
   using shared_ptr::get;

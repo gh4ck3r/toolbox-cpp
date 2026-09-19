@@ -21,7 +21,7 @@ constexpr bool is_type_complete_v<T, std::void_t<decltype(sizeof(T))>> = true;
 template <typename T,
          T *(*create_instance)() = default_ctor<T>,
          void (*destroy_instance)(T*) = default_dtor<T>>
-class SharedSingleton : public std::shared_ptr<T> {
+class SharedSingleton : private std::shared_ptr<T> {
   using shared_ptr = std::shared_ptr<T>;
 
   static inline typename shared_ptr::weak_type weak_instance;
@@ -49,6 +49,9 @@ class SharedSingleton : public std::shared_ptr<T> {
  public:
   SharedSingleton() : shared_ptr(get_instance()) {}
   inline operator auto() const { return shared_ptr::get(); }
+
+  using shared_ptr::operator->;
+  using shared_ptr::get;
 
   static inline auto use_count() { return weak_instance.use_count(); }
 };

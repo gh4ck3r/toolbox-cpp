@@ -16,7 +16,7 @@ template<typename, typename = void>
 constexpr bool is_type_complete_v = false;
 
 template<typename T>
-constexpr bool is_type_complete_v<T, std::void_t<decltype(typeid(T))>> = true;
+constexpr bool is_type_complete_v<T, std::void_t<decltype(sizeof(T))>> = true;
 
 template <typename T,
          T *(*create_instance)() = default_ctor<T>,
@@ -36,9 +36,7 @@ class SharedSingleton : public std::shared_ptr<T> {
       } else {
         std::ostringstream oss;
         oss << "failed to create SharedSingleton instance";
-        if constexpr (std::is_same_v<void, T>
-            || std::is_scalar_v<T>
-            || is_type_complete_v<T>)
+        if constexpr (is_type_complete_v<T>)
         {
           oss << " for " << typeid(T).name();
         }

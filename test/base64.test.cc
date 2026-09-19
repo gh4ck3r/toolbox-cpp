@@ -64,3 +64,44 @@ TEST(base64, decode_as)
   std::vector<uint8_t> v{begin(s), end(s)};
   EXPECT_EQ(v, base64::decode_as<decltype(v)>("aGVsbG8gd29ybGQ="sv));
 }
+
+TEST(base64, encode_empty)
+{
+  EXPECT_EQ(""s, base64::encode(""s));
+  EXPECT_EQ(""s, base64::encode(""sv));
+}
+
+TEST(base64, decode_empty)
+{
+  EXPECT_EQ(""s, base64::decode(""s));
+}
+
+TEST(base64, encode_padding)
+{
+  EXPECT_EQ("Zg=="s, base64::encode("f"s));
+  EXPECT_EQ("Zm8="s, base64::encode("fo"s));
+  EXPECT_EQ("Zm9v"s, base64::encode("foo"s));
+}
+
+TEST(base64, decode_padding)
+{
+  EXPECT_EQ("f"s, base64::decode("Zg=="s));
+  EXPECT_EQ("f"s, base64::decode("Zg"s));
+
+  EXPECT_EQ("fo"s, base64::decode("Zm8="s));
+  EXPECT_EQ("fo"s, base64::decode("Zm8"s));
+
+  EXPECT_EQ("foo"s, base64::decode("Zm9v"s));
+}
+
+TEST(base64, decode_invalid_chars)
+{
+  EXPECT_THROW(base64::decode("!!!?"s), std::invalid_argument);
+}
+
+TEST(base64, decode_non_ascii)
+{
+  std::string non_ascii_b64 = "\x80\xFF==";
+  EXPECT_THROW(base64::decode(non_ascii_b64), std::invalid_argument);
+}
+

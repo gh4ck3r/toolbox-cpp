@@ -10,7 +10,7 @@ template <typename T>
 inline T *default_ctor() { return new T{}; }
 
 template <typename T>
-inline void default_dtor(T *p) { delete p; };
+inline void default_dtor(T *p) { delete p; }
 
 template<typename, typename = void>
 constexpr bool is_type_complete_v = false;
@@ -67,8 +67,9 @@ class SingletonTraits {
 };
 
 template <typename T>
-struct StaticSingleton final : T, private SingletonTraits {
-  StaticSingleton() = delete;
+class StaticSingleton final : public T, private SingletonTraits {
+  StaticSingleton() = default;
+ public:
   static inline T &instance() {
     static StaticSingleton s {};
     return s;

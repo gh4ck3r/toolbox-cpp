@@ -36,6 +36,16 @@ TEST_F(OpenSSL1Test, SEED_CBC)
     .finalize()));
 }
 
+TEST_F(OpenSSL1Test, SEED_CBC_multiple_update)
+{
+  Encryptor<Alg::SEED, Mode::CBC> enc{};
+  enc.update(plaintext_.data(), 5);
+  enc.update(plaintext_.data() + 5, plaintext_.size() - 5);
+  const auto ciphertext = enc.finalize();
+
+  EXPECT_EQ(ciphertext_, ciphertext);
+}
+
 #if OPENSSL_VERSION_NUMBER >= 0x030000000 // 3.0.0
 class OpenSSL3Test : public OpenSSLTest {
  protected:
@@ -81,5 +91,22 @@ TEST_F(OpenSSL3Test, SEED_CBC)
   EXPECT_EQ(plaintext_, (Decryptor<Alg::SEED, Mode::CBC>{}
     .update(ciphertext_.data(), ciphertext_.size())
     .finalize()));
+}
+
+TEST_F(OpenSSL3Test, SEED_CBC_multiple_update)
+{
+  Encryptor<Alg::SEED, Mode::CBC> enc{};
+  enc.update(plaintext_.data(), 5);
+  enc.update(plaintext_.data() + 5, plaintext_.size() - 5);
+  const auto ciphertext = enc.finalize();
+
+  EXPECT_EQ(ciphertext_, ciphertext);
+
+  Decryptor<Alg::SEED, Mode::CBC> dec{};
+  dec.update(ciphertext.data(), 8);
+  dec.update(ciphertext.data() + 8, ciphertext.size() - 8);
+  const auto decrypted = dec.finalize();
+
+  EXPECT_EQ(plaintext_, decrypted);
 }
 #endif

@@ -86,8 +86,12 @@ class Cipher {
   {
     if constexpr (alg == Alg::SEED) { ossl_provider_.emplace("legacy"); }
 
+    if (!ctx_) throw ERR {"Failed to create cipher context"};
+
     constexpr auto EVP_CryptInit = Encrypt ? EVP_EncryptInit : EVP_DecryptInit;
-    EVP_CryptInit(ctx_, Info<alg, mode>::EVP(), key.data(), iv.data());
+    if (1 != EVP_CryptInit(ctx_, Info<alg, mode>::EVP(), key.data(), iv.data())) {
+      throw ERR {"Failed to initialize context"};
+    }
   }
 
   ~Cipher() noexcept {
@@ -95,8 +99,9 @@ class Cipher {
   }
 
   auto &update(const uint8_t *data, size_t len) {
-    if (outbuf_.size() - outbuf_offset_ < len) {
-      outbuf_.resize(std::max(outbuf_.capacity(), len) << 1);
+    const size_t required = outbuf_offset_ + len + Info<alg, mode>::block_siz;
+    if (outbuf_.size() < required) {
+      outbuf_.resize(std::max(outbuf_.capacity() * 2, required));
     }
 
     const auto int_cutoff = [] (const size_t &n) {
@@ -117,11 +122,17 @@ class Cipher {
       {
         throw ERR {"Failed to update cipher"};
       }
+      outbuf_offset_ += static_cast<size_t>(outl);
     }
     return *this;
   }
 
   const auto &finalize() {
+    const size_t required = outbuf_offset_ + Info<alg, mode>::block_siz;
+    if (outbuf_.size() < required) {
+      outbuf_.resize(required);
+    }
+
     int32_t outl;
     constexpr auto EVP_CryptFinal = Encrypt ? EVP_EncryptFinal_ex : EVP_DecryptFinal_ex;
     if (1 != EVP_CryptFinal(ctx_, outbuf_.data() + outbuf_offset_, &outl))
@@ -179,8 +190,9 @@ class Cipher {
   ~Cipher() { EVP_CIPHER_CTX_free(ctx_); }
 
   auto &update(const uint8_t *data, size_t len) {
-    if (outbuf_.size() - outbuf_offset_ < len) {
-      outbuf_.resize(std::max(outbuf_.capacity(), len) << 1);
+    const size_t required = outbuf_offset_ + len + Info<alg, mode>::block_siz;
+    if (outbuf_.size() < required) {
+      outbuf_.resize(std::max(outbuf_.capacity() * 2, required));
     }
 
     const auto int_cutoff = [] (const size_t &n) {
@@ -200,11 +212,17 @@ class Cipher {
       {
         throw ERR {"Failed to update cipher"};
       }
+      outbuf_offset_ += static_cast<size_t>(outl);
     }
     return *this;
   }
 
   const auto &finalize() {
+    const size_t required = outbuf_offset_ + Info<alg, mode>::block_siz;
+    if (outbuf_.size() < required) {
+      outbuf_.resize(required);
+    }
+
     int32_t outl;
     if (1 != EVP_CipherFinal(ctx_, outbuf_.data() + outbuf_offset_, &outl))
       throw ERR {"Failed to finalize"};

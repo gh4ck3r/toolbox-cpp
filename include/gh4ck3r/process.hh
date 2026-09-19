@@ -12,18 +12,13 @@
 #include <stdexcept>
 #include <vector>
 #include <csignal>
-#include <gh4ck3r/file.hh>
-
-extern "C" {
-#include <fcntl.h>
-#include <unistd.h>
 #include <poll.h>
+#include <unistd.h>
 #include <sys/wait.h>
+extern "C" {
 #include <sys/pidfd.h>
-#include <sys/syscall.h>
-
-extern "C" char **environ;
-}
+} // extern "C"
+#include <gh4ck3r/file.hh>
 
 namespace gh4ck3r::process {
 
@@ -282,7 +277,13 @@ std::string stringify(T&& val) {
 
 inline int waitpid(const pid_t pid)
 {
-  if (int status; ::waitpid(pid, &status, 0) == pid) {
+  int status = 0;
+  pid_t res = 0;
+  do {
+    res = ::waitpid(pid, &status, 0);
+  } while (res == -1 && errno == EINTR);
+
+  if (res == pid) {
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status))
       return static_cast<int>(exit_code::signaled) + WTERMSIG(status);
@@ -293,7 +294,12 @@ inline int waitpid(const pid_t pid)
 inline int wait_fd(const filesystem::unique_fd &pid_fd)
 {
   siginfo_t siginfo {};
-  if (::waitid(P_PIDFD, static_cast<int>(pid_fd), &siginfo, WEXITED) == 0) {
+  int res = 0;
+  do {
+    res = ::waitid(P_PIDFD, static_cast<int>(pid_fd), &siginfo, WEXITED);
+  } while (res == -1 && errno == EINTR);
+
+  if (res == 0) {
     return siginfo.si_code == CLD_EXITED ? siginfo.si_status :
       static_cast<int>(exit_code::signaled) + siginfo.si_status;
   }
@@ -347,7 +353,11 @@ class timeout_error : public std::runtime_error {
 
 inline std::optional<filesystem::unique_fd> pidfd_open(pid_t pid, unsigned int flags)
 {
-  auto fd = ::pidfd_open(pid, flags);
+  int fd = -1;
+  do {
+    fd = ::pidfd_open(pid, flags);
+  } while (fd == -1 && errno == EINTR);
+
   if (fd == -1) [[unlikely]] {
     if (errno == ESRCH) return std::nullopt;
     throw std::system_error {
@@ -382,18 +392,32 @@ inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
     .events = POLLIN,
     .revents = 0,
   };
-  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
-  if (d > d.zero() && ms == 0) ms = 1;
 
-  const auto ret = ::poll(&pfd, 1, ms);
-  if (ret == 0) {
-    throw timeout_error {pid, d};
-  } else if (ret < 0) {
-    throw std::system_error {errno, std::system_category(), "failed to poll pidfd"};
+  const auto deadline = std::chrono::steady_clock::now() + d;
+
+  while (true) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      throw timeout_error {pid, d};
+    }
+
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    int ms = static_cast<int>(remaining.count());
+    if (ms <= 0 && remaining.count() > 0) ms = 1;
+
+    const auto ret = ::poll(&pfd, 1, ms);
+    if (ret > 0) {
+      return detail::wait_fd(*pid_fd);
+    } else if (ret == 0) {
+      throw timeout_error {pid, d};
+    } else if (errno == EINTR) {
+      continue;
+    } else {
+      throw std::system_error {errno, std::system_category(), "failed to poll pidfd"};
+    }
   }
-
-  return detail::wait_fd(*pid_fd);
 }
+
 
 inline pid_t ppidof(const pid_t pid)
 {

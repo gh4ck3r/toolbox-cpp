@@ -156,3 +156,37 @@ TEST(ppidof, malformed_name)
   ::kill(pid, SIGTERM);
   EXPECT_EQ(wait(pid), static_cast<int>(exit_code::signaled) + SIGTERM);
 }
+
+TEST(process_exec, non_executable)
+{
+  EXPECT_THROW((void)execute("/non_existent_binary_file_12345"), std::invalid_argument);
+}
+
+static void sigusr1_handler(int) {}
+
+TEST(process_exec, wait_for_eintr)
+{
+  struct sigaction sa {};
+  sa.sa_handler = sigusr1_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0; // Notice: SA_RESTART is NOT set!
+  sigaction(SIGUSR1, &sa, nullptr);
+
+  const auto pid = execute("/bin/sleep", "2");
+  ASSERT_GE(pid, 0);
+
+  // Send SIGUSR1 to ourselves after 50ms using a thread
+  std::thread signal_thread([] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    ::kill(::getpid(), SIGUSR1);
+  });
+
+  using namespace std::chrono_literals;
+  // If wait_for does NOT retry on EINTR, it throws std::system_error (Interrupted system call)
+  EXPECT_NO_THROW({
+    const auto ec = wait_for(pid, 3s);
+    EXPECT_EQ(ec, 0);
+  });
+
+  signal_thread.join();
+}

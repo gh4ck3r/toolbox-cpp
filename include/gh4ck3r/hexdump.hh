@@ -2,14 +2,37 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <ios>
 #include <iterator>
 #include <memory>
 #include <sstream>
-#include <tuple>
+#include <type_traits>
 
 namespace gh4ck3r {
+
+template <typename T>
+constexpr uint64_t to_unsigned_hex_val(const T& c) {
+  if constexpr (std::is_integral_v<T> || std::is_enum_v<T>) {
+    if constexpr (sizeof(T) == 1) {
+      return static_cast<uint64_t>(static_cast<uint8_t>(c));
+    } else if constexpr (sizeof(T) == 2) {
+      return static_cast<uint64_t>(static_cast<uint16_t>(c));
+    } else if constexpr (sizeof(T) == 4) {
+      return static_cast<uint64_t>(static_cast<uint32_t>(c));
+    } else {
+      return static_cast<uint64_t>(c);
+    }
+  } else if constexpr (std::is_same_v<T, std::byte>) {
+    return static_cast<uint64_t>(static_cast<uint8_t>(c));
+  } else {
+    uint64_t u{0};
+    std::memcpy(&u, std::addressof(c), std::min(sizeof(T), sizeof(uint64_t)));
+    return u;
+  }
+}
 
 template <typename Iter>
 auto hexdump(const Iter beg, const Iter end)
@@ -19,25 +42,32 @@ auto hexdump(const Iter beg, const Iter end)
 
   constexpr auto col_bytes = sizeof(*beg);
   constexpr std::ptrdiff_t width = 0x10 / col_bytes;
-  static_assert(width);
-  for (auto [cur, ncols] = std::tuple {beg, std::ptrdiff_t{}};
-      cur != end;
-      cur += ncols, oss << '\n')
+  static_assert(width > 0, "col_bytes must be <= 16");
+
+  for (auto cur = beg; cur != end; oss << '\n')
   {
-    ncols = std::min(width , end - cur);
+    const auto remaining = std::distance(cur, end);
+    const auto ncols = std::min(width, remaining);
+    const auto cur_end = std::next(cur, ncols);
 
     oss << std::setfill('0')
-      << reinterpret_cast<const void*>(std::addressof(*beg) + (cur - beg))
+      << reinterpret_cast<const void*>(std::addressof(*cur))
       << "  ";
 
-    transform(cur, cur + ncols, std::ostream_iterator<int> {oss, " "},
+    std::transform(cur, cur_end, std::ostream_iterator<uint64_t> {oss, " "},
         [&oss] (const auto &c) {
           oss.width(2 * col_bytes);
-          return 0xff & c;
+          return to_unsigned_hex_val(c);
         });
+
     std::fill_n(std::ostream_iterator<char> {oss}, (1 + 2 * col_bytes) * (width - ncols), ' ');
-    transform(cur, cur + ncols, std::ostream_iterator<char> {oss << ' '},
-        [] (const auto &c) { return std::isprint(c) ? c : '.'; });
+    std::transform(cur, cur_end, std::ostream_iterator<char> {oss << ' '},
+        [] (const auto &c) {
+          const auto u = to_unsigned_hex_val(c);
+          return (u >= 0x20 && u <= 0x7e) ? static_cast<char>(u) : '.';
+        });
+
+    cur = cur_end;
   }
 
   return oss.str();

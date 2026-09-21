@@ -181,3 +181,27 @@ TEST(hexdump, vector16)
 
   EXPECT_EQ(output, hexdump(v));
 }
+
+TEST(hexdump, vector16_truncation_bug)
+{
+  const std::vector<uint16_t> v { 0x1234, 0xabcd };
+  const auto output = [] (const void * const p) {
+    std::ostringstream oss;
+    oss << p <<  "  1234 abcd                                ..\n";
+    return oss.str();
+  }(v.data());
+
+  EXPECT_EQ(output, hexdump(v));
+}
+
+TEST(hexdump, vector32)
+{
+  const std::vector<uint32_t> v { 0x12345678, 0xdeadbeef };
+  const auto output = [] (const void * const p) {
+    std::ostringstream oss;
+    oss << p <<  "  12345678 deadbeef                    ..\n";
+    return oss.str();
+  }(v.data());
+
+  EXPECT_EQ(output, hexdump(v));
+}

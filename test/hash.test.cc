@@ -37,7 +37,7 @@ struct std::hash<gh4ck3r::whatever::Person> {
 
 TEST(hash, custom_type)
 {
-  gh4ck3r::whatever::Person p1 {"foo", 10}, p2 {"foo", 10}; 
+  gh4ck3r::whatever::Person p1 {"foo", 10}, p2 {"foo", 10};
   EXPECT_EQ(p1, p2);
 
   const std::hash<gh4ck3r::whatever::Person> hash;
@@ -128,4 +128,24 @@ TEST(hash, unordered_set_enum)
 
   std::tie(_, inserted) = tags.insert({"foo", {medium, low, medium, low}});
   EXPECT_FALSE(inserted);
+}
+
+TEST(hash, unordered_map_combine)
+{
+  std::unordered_map<std::string, int> m {
+    {"one", 1},
+    {"two", 2},
+  };
+  EXPECT_NE(0, gh4ck3r::unordered_hash_combine(m));
+}
+
+TEST(hash, empty_combine)
+{
+  EXPECT_EQ(0, gh4ck3r::hash_combine());
+}
+
+TEST(hash, pair_hash)
+{
+  auto p = std::make_pair(std::string("key"), 42);
+  EXPECT_NE(0, gh4ck3r::hash_value(p));
 }

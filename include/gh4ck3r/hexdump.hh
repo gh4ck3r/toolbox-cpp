@@ -14,23 +14,27 @@
 namespace gh4ck3r {
 
 template <typename T>
-constexpr uint64_t to_unsigned_hex_val(const T& c) {
+constexpr auto to_unsigned_hex_val(const T& c) {
   if constexpr (std::is_integral_v<T> || std::is_enum_v<T>) {
-    if constexpr (sizeof(T) == 1) {
-      return static_cast<uint64_t>(static_cast<uint8_t>(c));
-    } else if constexpr (sizeof(T) == 2) {
-      return static_cast<uint64_t>(static_cast<uint16_t>(c));
+    if constexpr (sizeof(T) <= 2) {
+      return static_cast<unsigned int>(static_cast<std::make_unsigned_t<T>>(c));
     } else if constexpr (sizeof(T) == 4) {
-      return static_cast<uint64_t>(static_cast<uint32_t>(c));
+      return static_cast<uint32_t>(c);
     } else {
       return static_cast<uint64_t>(c);
     }
   } else if constexpr (std::is_same_v<T, std::byte>) {
-    return static_cast<uint64_t>(static_cast<uint8_t>(c));
+    return static_cast<unsigned int>(static_cast<uint8_t>(c));
   } else {
-    uint64_t u{0};
-    std::memcpy(&u, std::addressof(c), std::min(sizeof(T), sizeof(uint64_t)));
-    return u;
+    if constexpr (sizeof(T) <= 4) {
+      uint32_t u{0};
+      std::memcpy(&u, std::addressof(c), sizeof(T));
+      return u;
+    } else {
+      uint64_t u{0};
+      std::memcpy(&u, std::addressof(c), std::min(sizeof(T), sizeof(uint64_t)));
+      return u;
+    }
   }
 }
 
@@ -44,6 +48,8 @@ auto hexdump(const Iter beg, const Iter end)
   constexpr std::ptrdiff_t width = 0x10 / col_bytes;
   static_assert(width > 0, "col_bytes must be <= 16");
 
+  using hex_type = decltype(to_unsigned_hex_val(*beg));
+
   for (auto cur = beg; cur != end; oss << '\n')
   {
     const auto remaining = std::distance(cur, end);
@@ -54,7 +60,7 @@ auto hexdump(const Iter beg, const Iter end)
       << reinterpret_cast<const void*>(std::addressof(*cur))
       << "  ";
 
-    std::transform(cur, cur_end, std::ostream_iterator<uint64_t> {oss, " "},
+    std::transform(cur, cur_end, std::ostream_iterator<hex_type> {oss, " "},
         [&oss] (const auto &c) {
           oss.width(2 * col_bytes);
           return to_unsigned_hex_val(c);

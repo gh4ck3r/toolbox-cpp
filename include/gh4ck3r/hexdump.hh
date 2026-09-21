@@ -13,6 +13,8 @@
 
 namespace gh4ck3r {
 
+namespace detail {
+
 template <typename T>
 constexpr auto to_unsigned_hex_val(const T& c) {
   if constexpr (std::is_integral_v<T> || std::is_enum_v<T>) {
@@ -38,6 +40,8 @@ constexpr auto to_unsigned_hex_val(const T& c) {
   }
 }
 
+} // namespace detail
+
 template <typename Iter>
 auto hexdump(const Iter beg, const Iter end)
 {
@@ -48,7 +52,7 @@ auto hexdump(const Iter beg, const Iter end)
   constexpr std::ptrdiff_t width = 0x10 / col_bytes;
   static_assert(width > 0, "col_bytes must be <= 16");
 
-  using hex_type = decltype(to_unsigned_hex_val(*beg));
+  using hex_type = decltype(detail::to_unsigned_hex_val(*beg));
 
   for (auto cur = beg; cur != end; oss << '\n')
   {
@@ -63,13 +67,13 @@ auto hexdump(const Iter beg, const Iter end)
     std::transform(cur, cur_end, std::ostream_iterator<hex_type> {oss, " "},
         [&oss] (const auto &c) {
           oss.width(2 * col_bytes);
-          return to_unsigned_hex_val(c);
+          return detail::to_unsigned_hex_val(c);
         });
 
     std::fill_n(std::ostream_iterator<char> {oss}, (1 + 2 * col_bytes) * (width - ncols), ' ');
     std::transform(cur, cur_end, std::ostream_iterator<char> {oss << ' '},
         [] (const auto &c) {
-          const auto u = to_unsigned_hex_val(c);
+          const auto u = detail::to_unsigned_hex_val(c);
           return (u >= 0x20 && u <= 0x7e) ? static_cast<char>(u) : '.';
         });
 

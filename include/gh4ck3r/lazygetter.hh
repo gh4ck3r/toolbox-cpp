@@ -1,5 +1,4 @@
 #pragma once
-#include <functional>
 #include <variant>
 #include <mutex>
 #include <type_traits>
@@ -21,13 +20,12 @@ class LazyGetter {
   explicit LazyGetter(GETTER getter) : val_(getter) {}
 
   operator T&() const {
-    return std::visit([&] (auto &v) -> T& {
-        using V = std::remove_reference_t<std::remove_cv_t<decltype(v)>>;
-        if constexpr (std::is_same_v<V, GETTER>) {
-          std::call_once(flag_, [&] {val_ = v();});
-        }
-        return std::get<T>(val_);
-      }, val_);
+    std::call_once(flag_, [this] {
+      if (auto* pgetter = std::get_if<GETTER>(&val_)) {
+        val_.template emplace<T>((*pgetter)());
+      }
+    });
+    return std::get<T>(val_);
   }
 
   template <typename U>
@@ -37,7 +35,7 @@ class LazyGetter {
     return *this;
   }
 
-  inline bool operator==(const T rhs) const {
+  inline bool operator==(const T& rhs) const {
     return static_cast<T&>(*this) == rhs;
   }
 
@@ -46,7 +44,7 @@ class LazyGetter {
   mutable std::once_flag flag_;
 
  private:
-  friend inline bool operator==(const T lhs, const LazyGetter &rhs) {
+  friend inline bool operator==(const T& lhs, const LazyGetter &rhs) {
     return rhs == lhs;
   }
 };

@@ -310,3 +310,30 @@ TEST_F(list_head_test, list_node_iterator_post_inc)
     EXPECT_EQ(&(*arr_iter++), &(*list_iter++));
   }
 }
+
+TEST_F(list_head_test, large_node)
+{
+  struct LargeNode {
+    char payload[65536];
+    int id;
+    list_head link;
+  };
+
+  std::vector<LargeNode> nodes(2);
+  nodes[0].id = 100;
+  nodes[1].id = 200;
+
+  list_head head {};
+  using namespace gh4ck3r::c_compat::list_head;
+  head << list_node_container<&LargeNode::link>(nodes);
+
+  size_t idx = 0;
+  using LargeNodeView = list_view<&LargeNode::link>;
+  for (const auto &node : LargeNodeView{head}) {
+    EXPECT_EQ(nodes[idx].id, node.id);
+    EXPECT_EQ(&nodes[idx], &node);
+    idx++;
+  }
+  EXPECT_EQ(2u, idx);
+}
+

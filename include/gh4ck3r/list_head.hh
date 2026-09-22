@@ -26,9 +26,8 @@ struct container_of<MemberType ClassType::*> {
 };
 
 template <typename T, typename R>
-static inline ptrdiff_t offset_of(R T::* member) {
-  alignas(T) std::byte dummy[sizeof(T)];
-  const auto *ptr = reinterpret_cast<const T*>(dummy);
+static inline constexpr ptrdiff_t offset_of(R T::* member) {
+  const auto *ptr = reinterpret_cast<const T*>(0x1000);
   const auto *member_ptr = &(ptr->*member);
   return reinterpret_cast<const char *>(member_ptr)
           - reinterpret_cast<const char *>(ptr);
@@ -233,8 +232,8 @@ class list_node_iterator {
   using iterator_category = std::forward_iterator_tag;
   using value_type        = binder_t::node_type;
   using difference_type   = std::ptrdiff_t;
-  using pointer           = value_type*;
-  using reference         = value_type&;
+  using pointer           = std::add_pointer_t<value_type>;
+  using reference         = std::add_lvalue_reference_t<value_type>;
 
   explicit list_node_iterator(const ::list_head &head = empty_head_) :
     head_(head),

@@ -33,8 +33,10 @@ class Reaper {
   resource_type resource_;
 
   inline void reset(resource_type r = INVALID) {
-    if (resource_ != INVALID) Deleter(std::exchange(resource_, r));
+    if (resource_ != INVALID) Deleter(resource_);
+    resource_ = r;
   }
+
  public:
   Reaper(resource_type &&r) : resource_ (std::exchange(r, INVALID)) {
     if (resource_ == INVALID) [[unlikely]] {
@@ -54,23 +56,35 @@ class Reaper {
     return *this;
   }
 
+  Reaper(Reaper &&other) noexcept : resource_(other.release()) {}
+
+  Reaper &operator=(Reaper &&other) noexcept {
+    if (this != &other) {
+      reset(other.release());
+    }
+    return *this;
+  }
+
+
   ~Reaper() { reset(); }
 
   [[nodiscard]]
-  inline resource_type release() {
+  inline resource_type release() noexcept {
     return std::exchange(resource_, INVALID);
   }
 
-  inline resource_type operator->() const
+  inline resource_type operator->() const noexcept
   requires (std::is_pointer_v<resource_type> && metatype::is_complete_v<std::remove_pointer_t<resource_type>> ) {
-    return resource_; }
-  operator bool () const { return resource_ != INVALID; }
+    return resource_;
+  }
 
-  inline operator resource_type () const { return resource_; }
+  explicit operator bool () const noexcept { return resource_ != INVALID; }
+
+  inline operator resource_type () const noexcept { return resource_; }
 
   template <typename P>
   requires (std::is_same_v<resource_type, void*> && std::is_pointer_v<P>)
-  operator P () const { return reinterpret_cast<P>(resource_); }
+  operator P () const noexcept { return reinterpret_cast<P>(resource_); }
 
  private:
   Reaper() = delete;
@@ -84,3 +98,4 @@ class Reaper {
 Reaper(FILE*) -> Reaper<std::fclose>;
 
 } // namespace gh4ck3r::reaper
+

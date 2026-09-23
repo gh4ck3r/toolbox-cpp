@@ -82,3 +82,30 @@ TEST(Reaper, invalid_value)
   static_assert(invalid_value<::fclose>() == nullptr);
   static_assert(invalid_value<::close>() == -1);
 }
+
+TEST(Reaper, object_move_construct)
+{
+  Reaper file1 {std::fopen(__FILE__, "r")};
+  ASSERT_TRUE(file1);
+
+  Reaper file2 = std::move(file1);
+  EXPECT_FALSE(file1);
+  EXPECT_TRUE(file2);
+
+  char buf[8 + 1];
+  buf[fread(buf, 1, sizeof(buf) - 1, file2)] = 0x00;
+  EXPECT_STREQ(buf, "#include") << buf;
+}
+
+TEST(Reaper, object_move_assign)
+{
+  Reaper file1 {std::fopen(__FILE__, "r")};
+  Reaper file2 {std::fopen(__FILE__, "r")};
+  ASSERT_TRUE(file1);
+  ASSERT_TRUE(file2);
+
+  file2 = std::move(file1);
+  EXPECT_FALSE(file1);
+  EXPECT_TRUE(file2);
+}
+

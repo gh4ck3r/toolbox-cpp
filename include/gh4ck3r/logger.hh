@@ -1,6 +1,8 @@
 #pragma once
+#include <algorithm>
 #include <ostream>
 #include <streambuf>
+#include <string_view>
 
 namespace gh4ck3r {
 
@@ -19,11 +21,19 @@ class indent_ostreambuf : public std::streambuf {
   int overflow(int c) override {
     if (c != traits_type::eof()) {
       if (need_prefix && nindent) {
-        const std::string prefix(nindent, ' ');
-        if (const auto nput = sbuf->sputn(prefix.data(), nindent);
-            static_cast<size_t>(nput) != nindent)
-        {
-          return std::char_traits<char>::eof();
+        static constexpr std::string_view spaces =
+          "                                                                ";
+        static_assert(!spaces.empty() && spaces.size() % 64 == 0,
+                      "spaces buffer size must be a non-empty multiple of 64");
+
+        size_t remaining = nindent;
+        while (remaining > 0) {
+          const size_t chunk = std::min(remaining, spaces.size());
+          const auto nput = sbuf->sputn(spaces.data(), static_cast<std::streamsize>(chunk));
+          if (nput < 0 || static_cast<size_t>(nput) != chunk) {
+            return std::char_traits<char>::eof();
+          }
+          remaining -= chunk;
         }
       }
       need_prefix = c == '\n';
@@ -46,10 +56,11 @@ class indent_ostream : private virtual indent_ostreambuf, public std::ostream {
   virtual ~indent_ostream() = default;
 
   inline void indent(const size_t nlevel = 1) {
-    nindent += nlevel * indent_level_; };
+    nindent += nlevel * indent_level_;
+  }
   inline void unindent(const size_t nlevel = 1) {
-    nindent -= nlevel * indent_level_;
-  };
+    nindent -= std::min(nindent, nlevel * indent_level_);
+  }
 
   template<bool RIGHT>
   class do_indent {
@@ -79,3 +90,4 @@ using indent = Logger::do_indent<true>;
 using unindent = Logger::do_indent<false>;
 
 } // namespace gh4ck3r
+

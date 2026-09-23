@@ -69,6 +69,30 @@ TEST_F(SharedSingletonDefaultTest, implicit_conversion)
   EXPECT_EQ(s.get(), raw);
 }
 
+TEST_F(SharedSingletonDefaultTest, copy_and_move)
+{
+  Service s1;
+  EXPECT_EQ(1, Service::use_count());
+
+  Service s2 = s1; // Copy construction
+  EXPECT_EQ(2, Service::use_count());
+  EXPECT_EQ(s1.get(), s2.get());
+
+  Service s3 = std::move(s1); // Move construction
+  EXPECT_EQ(2, Service::use_count());
+  EXPECT_EQ(s2.get(), s3.get());
+
+  Service s4;
+  s4 = s2; // Copy assignment
+  EXPECT_EQ(3, Service::use_count());
+  EXPECT_EQ(s2.get(), s4.get());
+
+  Service s5;
+  s5 = std::move(s4); // Move assignment
+  EXPECT_EQ(3, Service::use_count());
+  EXPECT_EQ(s2.get(), s5.get());
+}
+
 TEST(SharedSingleton, creation_failure)
 {
   constexpr auto fail_create = [] () -> int* { return nullptr; };

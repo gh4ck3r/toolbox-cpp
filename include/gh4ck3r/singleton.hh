@@ -12,12 +12,6 @@ inline T *default_ctor() { return new T{}; }
 template <typename T>
 inline void default_dtor(T *p) { delete p; }
 
-template<typename, typename = void>
-constexpr bool is_type_complete_v = false;
-
-template<typename T>
-constexpr bool is_type_complete_v<T, std::void_t<decltype(sizeof(T))>> = true;
-
 template <typename T,
          T *(*create_instance)() = default_ctor<T>,
          void (*destroy_instance)(T*) = default_dtor<T>>
@@ -25,9 +19,10 @@ class SharedSingleton : private std::shared_ptr<T> {
   using shared_ptr = std::shared_ptr<T>;
 
   static inline typename shared_ptr::weak_type weak_instance;
+  static inline std::mutex instance_mutex;
+
   static inline auto get_instance() {
-    static std::mutex m;
-    std::lock_guard lk{m};
+    std::lock_guard lk{instance_mutex};
     auto sp = weak_instance.lock();
     if (!sp) {
       if (T* p = create_instance(); p) {
@@ -35,11 +30,7 @@ class SharedSingleton : private std::shared_ptr<T> {
         weak_instance = sp;
       } else {
         std::ostringstream oss;
-        oss << "failed to create SharedSingleton instance";
-        if constexpr (is_type_complete_v<T>)
-        {
-          oss << " for " << typeid(T).name();
-        }
+        oss << "failed to create SharedSingleton instance for " << typeid(T).name();
         throw std::runtime_error {oss.str()};
       }
     }
@@ -53,17 +44,18 @@ class SharedSingleton : private std::shared_ptr<T> {
   using shared_ptr::operator->;
   using shared_ptr::get;
 
-  static inline auto use_count() { return weak_instance.use_count(); }
+  static inline auto use_count() {
+    std::lock_guard lk{instance_mutex};
+    return weak_instance.use_count();
+  }
 };
 
 class SingletonTraits {
  protected:
   SingletonTraits()  = default;
   ~SingletonTraits() = default;
-  SingletonTraits(const SingletonTraits&)             = delete;
-  SingletonTraits(      SingletonTraits&&)            = delete;
-  SingletonTraits& operator=(const SingletonTraits&)  = delete;
-  SingletonTraits& operator=(      SingletonTraits&&) = delete;
+  SingletonTraits(const SingletonTraits&)            = delete;
+  SingletonTraits& operator=(const SingletonTraits&) = delete;
 };
 
 template <typename T>

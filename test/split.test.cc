@@ -124,4 +124,12 @@ TEST(split, escape_sep3)
   EXPECT_EQ(values[2], R"(3\\\,4\)");
 }
 
+TEST(split, consecutive_escaped_sep)
+{
+  const auto values = split<',', '\\'>(R"(1\,2\,3,4)");
+  ASSERT_EQ(values.size(), 2);
+  EXPECT_EQ(values[0], R"(1\,2\,3)");
+  EXPECT_EQ(values[1], "4");
+}
+
 } //  namespace gh4ck3r

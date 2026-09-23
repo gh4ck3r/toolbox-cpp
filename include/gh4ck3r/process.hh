@@ -275,35 +275,27 @@ std::string stringify(T&& val) {
   }
 }
 
-inline int waitpid(const pid_t pid)
-{
-  int status = 0;
-  pid_t res = 0;
-  do {
-    res = ::waitpid(pid, &status, 0);
-  } while (res == -1 && errno == EINTR);
-
-  if (res == pid) {
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status))
-      return static_cast<int>(exit_code::signaled) + WTERMSIG(status);
-  }
-  return static_cast<int>(exit_code::out_of_range);
-}
-
-inline int wait_fd(const filesystem::unique_fd &pid_fd)
+template <idtype_t IDTYPE>
+inline int waitid(const id_t id)
 {
   siginfo_t siginfo {};
   int res = 0;
   do {
-    res = ::waitid(P_PIDFD, static_cast<int>(pid_fd), &siginfo, WEXITED);
-  } while (res == -1 && errno == EINTR);
+    res = ::waitid(IDTYPE, static_cast<id_t>(id), &siginfo, WEXITED);
+  } while ( res == -1 && errno == EINTR);
 
   if (res == 0) {
     return siginfo.si_code == CLD_EXITED ? siginfo.si_status :
       static_cast<int>(exit_code::signaled) + siginfo.si_status;
   }
+
   return static_cast<int>(exit_code::out_of_range);
+}
+
+inline int waitpid(const pid_t pid) { return waitid<P_PID>(pid); }
+inline int waitpidfd(const filesystem::fd_t pid) { return waitid<P_PIDFD>(pid); }
+inline int waitpidfd(const filesystem::unique_fd &pid_fd) {
+  return waitpidfd(static_cast<filesystem::fd_t>(pid_fd));
 }
 
 } // namespace detail
@@ -374,7 +366,7 @@ inline int wait(const pid_t pid)
 {
   const auto pid_fd = pidfd_open(pid, 0);
   if (!pid_fd) return detail::waitpid(pid);
-  return detail::wait_fd(*pid_fd);
+  return detail::waitpidfd(*pid_fd);
 }
 
 inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
@@ -407,7 +399,7 @@ inline int wait_for(const pid_t pid, const std::chrono::nanoseconds &d)
 
     const auto ret = ::poll(&pfd, 1, ms);
     if (ret > 0) {
-      return detail::wait_fd(*pid_fd);
+      return detail::waitpidfd(*pid_fd);
     } else if (ret == 0) {
       throw timeout_error {pid, d};
     } else if (errno == EINTR) {

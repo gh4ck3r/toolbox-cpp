@@ -17,4 +17,21 @@ TEST(type_traitsTest, is_complete)
   static_assert(!is_complete_v<baz>); // gotcha: already set to false
 }
 
+TEST(type_traitsTest, is_complete_fundamental_and_void)
+{
+  static_assert(is_complete_v<int>);
+  static_assert(is_complete_v<double>);
+  static_assert(is_complete_v<char>);
+
+  static_assert(!is_complete_v<void>);
+  static_assert(!is_complete_v<const void>);
+  static_assert(!is_complete_v<volatile void>);
+}
+
+TEST(type_traitsTest, is_complete_arrays)
+{
+  static_assert(is_complete_v<int[10]>);
+  static_assert(!is_complete_v<int[]>);
+}
+
 } // namespace gh4ck3r::metatype

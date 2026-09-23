@@ -51,4 +51,18 @@ TEST(typemapTest, declare)
   static_assert(std::is_same_v<mytypes::at<5u>, std::string>);
 }
 
+TEST(typemapTest, declare_mixed_key_types)
+{
+  enum class tag { a, b };
+  using mytypes = declare_t<
+      typedef_t<1, int>,
+      typedef_t<2u, double>,
+      typedef_t<tag::a, std::string>
+    >;
+
+  static_assert(std::is_same_v<mytypes::at<1>, int>);
+  static_assert(std::is_same_v<mytypes::at<2u>, double>);
+  static_assert(std::is_same_v<mytypes::at<tag::a>, std::string>);
+}
+
 } // namespace gh4ck3r::metatype::typemap

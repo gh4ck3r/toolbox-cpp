@@ -1,5 +1,4 @@
 #pragma once
-#include <tuple>
 #include <type_traits>
 
 namespace gh4ck3r::metatype::typemap {
@@ -26,9 +25,8 @@ struct declare_t : TDEFS... {
       "should be defined with typedef_t");
 
   using TDEFS::typefor...;
-  using first_t = std::tuple_element_t<0, std::tuple<TDEFS...>>;
 
-  template <decltype(first_t::key) KEY>
+  template <auto KEY>
   using at = typename decltype(typefor(key_t<KEY>{}))::mapped_type;
 };
 

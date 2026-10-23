@@ -169,18 +169,18 @@ class FileWriter
   explicit FileWriter(ARGS&&...args) :
     file_{std::make_unique<T>(std::forward<ARGS>(args)...)}
   {}
-  ~FileWriter() noexcept {}
+  ~FileWriter() noexcept = default;
 
   inline fd_t fd() const { return file_->fd(); }
   inline path_t path() const { return file_->path(); }
-  T& file() const { return reinterpret_cast<T&>(*file_); }
+  T& file() const { return static_cast<T&>(*file_); }
 
   bool write(const uint8_t *p, size_t l) {
     while (l) {
       const auto r = ::write(fd(), p, l);
       if (r < 0) {
         if (errno == EINTR) continue;
-        std::cerr << "failed to write to file: " << std::strerror(errno);
+        std::cerr << "failed to write to file: " << std::strerror(errno) << '\n';
         return false;
       }
       p += static_cast<size_t>(r);

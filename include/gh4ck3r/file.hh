@@ -54,11 +54,11 @@ class unique_fd {
   unique_fd(const unique_fd&) = delete;
   unique_fd& operator=(const unique_fd&) = delete;
 
-  inline operator fd_t() const { return fd_; }
-  inline operator bool() const { return is_valid(fd_); }
+  operator fd_t() const { return fd_; }
+  explicit operator bool() const { return is_valid(fd_); }
 
  private:
-  static inline void close(fd_t fd) noexcept {
+  static void close(fd_t fd) noexcept {
     if (fd < 0) return;
     int rv;
     do {
@@ -69,7 +69,7 @@ class unique_fd {
  private:
   fd_t fd_;
 
-  static inline constexpr fd_t uninitialized = -1;
+  static constexpr fd_t uninitialized = -1;
 };
 
 template <typename R = std::vector<uint8_t>>
@@ -153,7 +153,7 @@ class FileTrait
   virtual fd_t fd() const = 0;
   virtual ~FileTrait() noexcept {}
 
-  inline bool is_valid() const { return filesystem::is_valid(fd()); }
+  bool is_valid() const { return filesystem::is_valid(fd()); }
 };
 
 template <typename T>
@@ -171,8 +171,8 @@ class FileWriter
   {}
   ~FileWriter() noexcept = default;
 
-  inline fd_t fd() const { return file_->fd(); }
-  inline path_t path() const { return file_->path(); }
+  fd_t fd() const { return file_->fd(); }
+  path_t path() const { return file_->path(); }
   T& file() const { return static_cast<T&>(*file_); }
 
   bool write(const uint8_t *p, size_t l) {
@@ -196,7 +196,7 @@ class FileWriter
     c.data();
     c.size();
   }
-  inline bool write(const C &v) {
+  bool write(const C &v) {
     return write(reinterpret_cast<const uint8_t*>(v.data()), v.size());
   }
 
@@ -266,7 +266,7 @@ class TempDir : public FileTrait {
     std::cerr << "Unknown exception while destruction TempDir" << std::endl;
   }
 
-  inline const path_t &path() const override { return path_; }
+  const path_t &path() const override { return path_; }
   operator const path_t& () const { return path(); }
 
   path_t operator/(const path_t &rhs) const {
@@ -284,7 +284,7 @@ class TempDir : public FileTrait {
     return {tmpl.data()};
   }
 
-  friend inline std::ostream &operator<<(std::ostream &os, const TempDir &tmpdir) {
+  friend std::ostream &operator<<(std::ostream &os, const TempDir &tmpdir) {
     return os << tmpdir.path();
   }
 

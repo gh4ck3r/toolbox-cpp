@@ -6,6 +6,27 @@
 
 namespace gh4ck3r {
 namespace singleton {
+
+namespace detail {
+
+template <typename T>
+constexpr std::string_view debug_type_name() {
+  std::string_view name = __PRETTY_FUNCTION__;
+  size_t prefix_len = 
+#if defined(__clang__)
+    name.find("[T = ") + 5;
+#elif defined(__GNUC__)
+    name.find("[with T = ") + 10;
+#else
+  return "UnknownCompiler";
+#endif
+  size_t suffix_len = name.length() - prefix_len - 1;
+  name = name.substr(prefix_len, suffix_len);
+  return name.substr(0, name.find(";"));
+}
+
+} // namespace detail
+
 template <typename T>
 inline T *default_ctor() { return new T{}; }
 
@@ -30,7 +51,8 @@ class SharedSingleton : private std::shared_ptr<T> {
         weak_instance = sp;
       } else {
         std::ostringstream oss;
-        oss << "failed to create SharedSingleton instance for " << typeid(T).name();
+        oss << "failed to create SharedSingleton instance for "
+            << detail::debug_type_name<T>();
         throw std::runtime_error {oss.str()};
       }
     }

@@ -136,6 +136,12 @@ TEST(SharedSingleton, multithread)
   EXPECT_EQ(0, Svc::use_count());
 }
 
+TEST(SharedSingleton, typename)
+{
+  class Foo;
+  static_assert(detail::debug_type_name<Foo>().ends_with("Foo"));
+}
+
 class SingletonTraitsTest: public ::testing::Test {
  protected:
   class Descendant : SingletonTraits {};

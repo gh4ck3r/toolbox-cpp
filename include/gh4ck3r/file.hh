@@ -6,6 +6,7 @@
 #include <iterator>
 #include <memory>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 #include <vector>
 #include <cstdlib>
@@ -338,5 +339,75 @@ inline bool copy_all(const path_t &from, const path_t &to)
 
   return true;
 }
+
+class ScopedRootDir {
+  static unique_fd open_dir(const path_t &p) {
+    auto fd = ::open(p.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (fd == -1) throw std::system_error {
+      errno, std::system_category(), "failed to open directory: " + p.string()
+    };
+
+    if (auto high_fd = ::fcntl(fd, F_DUPFD_CLOEXEC, 1000); high_fd != -1) {
+      ::close(fd);
+      fd = high_fd;
+    }
+
+    return unique_fd {fd};
+  }
+
+  unique_fd old_root_;
+  unique_fd old_cwd_;
+
+ public:
+  explicit ScopedRootDir(const path_t &new_root) :
+    old_root_ {open_dir("/")},
+    old_cwd_ {open_dir(".")}
+  {
+    if (is_directory("/proc/self/task") && dir_siz("/proc/self/task") > 1)
+      throw std::runtime_error {
+        "ScopedRootDir can't be used when multiple threads are active"
+      };
+
+    if (!is_directory(new_root)) throw std::invalid_argument {
+      "new root is not a valid directory: " + new_root.string()
+    };
+
+    if (::chdir(new_root.c_str()) == -1) throw std::system_error {
+      errno, std::system_category(),
+      "failed to chdir to new root: " + new_root.string()
+    };
+
+    if (::chroot(".") == -1) {
+      const int err = errno;
+      if (::fchdir(old_cwd_) == -1) {
+        std::cerr << "failed to restore cwd after chroot failure: "
+                  << std::strerror(errno) << '\n';
+        std::terminate();
+      }
+      throw std::system_error {
+        err, std::system_category(),
+        "failed to chroot to directory (CAP_SYS_CHROOT required): " + new_root.string()
+      };
+    }
+  }
+  ScopedRootDir(const ScopedRootDir &) = delete;
+  ScopedRootDir &operator=(const ScopedRootDir &) = delete;
+  ScopedRootDir(ScopedRootDir &&) = delete;
+  ScopedRootDir &operator=(ScopedRootDir &&) = delete;
+
+  ~ScopedRootDir() noexcept {
+    if (::fchdir(old_root_) == -1 || ::chroot(".") == -1) {
+      std::cerr << "failed to restore root directory: "
+                << std::strerror(errno) << '\n';
+      std::terminate();
+    }
+
+    if (::fchdir(old_cwd_) == -1) {
+      std::cerr << "failed to restore current working directory: "
+                << std::strerror(errno) << '\n';
+      std::terminate();
+    }
+  }
+};
 
 } // namespace gh4ck3r::filesystem

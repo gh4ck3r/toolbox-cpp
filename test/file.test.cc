@@ -400,3 +400,28 @@ TEST(copy_all, dir)
   EXPECT_TS_EQ(f2.path(), dstdir / f2.path().filename());
   EXPECT_TS_EQ(f3.path(), dstdir / subdir / f3.path().filename());
 }
+
+#include <linux/capability.h>
+TEST(ScopedRootDir, basic)
+{
+  __user_cap_header_struct hdr {
+    .version = _LINUX_CAPABILITY_VERSION_3,
+    .pid = 0,
+  };
+  __user_cap_data_struct data[2];
+
+  ASSERT_EQ(syscall(SYS_capget, &hdr, data), 0);
+  if (!(data[0].effective & (1 << CAP_SYS_CHROOT)))
+    GTEST_SKIP() << "No CAP_SYS_CHROOT capability is given";
+
+  //CAP_SYS_CHROOT
+  path_t root_dir {"./root_dir"};
+  create_directories(root_dir);
+  ScopedRootDir new_root {root_dir};
+
+  EXPECT_FALSE(exists("/etc"));
+  EXPECT_FALSE(exists("/bin"));
+  EXPECT_FALSE(exists("/usr"));
+
+  EXPECT_EQ(current_path(), "/");
+}

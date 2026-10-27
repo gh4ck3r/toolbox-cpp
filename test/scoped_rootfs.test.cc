@@ -124,7 +124,7 @@ TEST(ScopedRootFilesystemValidation, RejectsInvalidAndDuplicatePaths) {
 TEST(ScopedRootFilesystemValidation, ExistingRootIsNotOwnedOrModified) {
   TempDir directory {"rootfs-existing"};
   write_file(directory.path() / "keep", "existing data");
-  EXPECT_THROW(RootFilesystemFactory {directory.path()}.create(), std::invalid_argument);
+  EXPECT_THROW((void)RootFilesystemFactory {directory.path()}.create(), std::invalid_argument);
   EXPECT_EQ(contents(directory.path() / "keep"), "existing data");
 }
 
@@ -244,9 +244,27 @@ TEST_F(ScopedRootFilesystemTest, OverlappingBindsDoNotTruncateTheOriginal) {
   EXPECT_EQ(contents(source() / "file"), "must survive");
 }
 
+TEST_F(ScopedRootFilesystemTest, ChildBindRegisteredBeforeParentIsNotShadowed) {
+  write_file(source() / "dir/file", "original");
+  write_file(source() / "override", "overridden");
+  {
+    auto scope = RootFilesystemFactory {root()}
+      .bind(source() / "override", "/data/file")
+      .bind(source() / "dir", "/data").create();
+    EXPECT_EQ(contents("/data/file"), "overridden");
+  }
+  EXPECT_EQ(contents(source() / "dir/file"), "original");
+}
+
+TEST_F(ScopedRootFilesystemTest, MissingNamespaceDirectoryReportsSystemError) {
+  fs::create_directories(source());
+  gh4ck3r::filesystem::ScopedRootDir chroot_guard {source()};
+  EXPECT_THROW((void)RootFilesystemFactory {"/scoped"}.create(), std::system_error);
+}
+
 TEST_F(ScopedRootFilesystemTest, RollsBackAPartiallyConstructedRoot) {
   write_file(source() / "file", "original");
-  EXPECT_THROW(RootFilesystemFactory {root()}
+  EXPECT_THROW((void)RootFilesystemFactory {root()}
       .bind(source(), "/readonly")
       .bind(source() / "missing", "/missing").create(), fs::filesystem_error);
   EXPECT_EQ(contents(source() / "file"), "original");
@@ -258,7 +276,7 @@ TEST_F(ScopedRootFilesystemTest, RejectsDestinationSymlinksWithoutFollowingThem)
   fs::create_directories(source());
   fs::create_symlink(canary, source() / "alias");
   write_file(directory_->path() / "replacement", "replacement");
-  EXPECT_THROW(RootFilesystemFactory {root()}
+  EXPECT_THROW((void)RootFilesystemFactory {root()}
       .bind(source(), "/readonly")
       .bind(directory_->path() / "replacement", "/readonly/alias").create(),
       std::invalid_argument);
@@ -525,10 +543,128 @@ TEST_F(ScopedExecutableMockTest, MalformedClientIsReportedWithoutLosingRestorati
 }
 
 TEST_F(ScopedExecutableMockTest, MissingMockTargetRollsBackAllBindings) {
-  EXPECT_THROW(RootFilesystemFactory {root()}.bind(source(), "/commands")
+  EXPECT_THROW((void)RootFilesystemFactory {root()}.bind(source(), "/commands")
       .mock("/commands/missing").create(), std::invalid_argument);
   EXPECT_EQ(contents(source() / "agent"),
             "#!/bin/sh\nprintf 'original:%s\\n' \"$1\"\nexit 7\n");
+}
+
+TEST_F(ScopedExecutableMockTest, CustomDirectoryBoundOverRuntimeLibraryPrefixSupportsMocks) {
+  auto scope = RootFilesystemFactory {root()}
+    .bind(source(), "/usr").mock("/usr/agent").create();
+  EXPECT_FALSE(fs::exists("/usr/lib"));
+  EXPECT_CALL(scope.mock("/usr/agent"), execute(ElementsAre("/usr/agent", "ok"), _, _, _))
+    .WillOnce(Return(37));
+  EXPECT_EQ(run_command("/usr/agent", {"ok"}).code, 37);
+}
+
+TEST_F(ScopedExecutableMockTest, NestedMockExecutionInsideCallbackDoesNotDeadlock) {
+  auto scope = RootFilesystemFactory {root()}
+    .bind(source(), "/one").bind(source(), "/two")
+    .mock("/one/agent").mock("/two/agent").create();
+  EXPECT_CALL(scope.mock("/two/agent"),
+              execute(ElementsAre("/two/agent", "from-outer"), _, _, _))
+    .WillOnce([](const auto &, int, int out, int) {
+      write_fd(out, "inner-output");
+      return 15;
+    });
+  EXPECT_CALL(scope.mock("/one/agent"), execute(ElementsAre("/one/agent"), _, _, _))
+    .WillOnce([](const auto &, int, int out, int) {
+      const auto inner = run_command("/two/agent", {"from-outer"});
+      write_fd(out, inner.output);
+      return inner.code + 10;
+    });
+  const auto result = run_command("/one/agent");
+  EXPECT_EQ(result.code, 25);
+  EXPECT_EQ(result.output, "inner-output");
+}
+
+TEST_F(ScopedExecutableMockTest, ConcurrentPipelineBetweenMockedCommandsDoesNotDeadlock) {
+  auto scope = RootFilesystemFactory {root()}
+    .bind(source(), "/one").bind(source(), "/two")
+    .mock("/one/agent").mock("/two/agent").create();
+  std::promise<void> consumer_entered;
+  auto consumer_ready = consumer_entered.get_future().share();
+  EXPECT_CALL(scope.mock("/two/agent"), execute(ElementsAre("/two/agent"), _, _, _))
+    .WillOnce([consumer_entered = std::move(consumer_entered)](const auto &, int in, int out, int) mutable {
+      consumer_entered.set_value();
+      std::array<char, 64> buffer {};
+      const auto count = ::read(in, buffer.data(), buffer.size());
+      if (count > 0) write_fd(out, std::string(buffer.data(), static_cast<std::size_t>(count)));
+      return 20;
+    });
+  EXPECT_CALL(scope.mock("/one/agent"), execute(ElementsAre("/one/agent"), _, _, _))
+    .WillOnce([consumer_ready](const auto &, int, int out, int) {
+      consumer_ready.wait();
+      write_fd(out, "piped payload");
+      return 10;
+    });
+  auto consumer_future = std::async(std::launch::async, [&] {
+    return run_command("/two/agent", {}, "piped payload");
+  });
+  consumer_ready.wait();
+  const auto producer_result = run_command("/one/agent");
+  const auto consumer_result = consumer_future.get();
+  EXPECT_EQ(producer_result.code, 10);
+  EXPECT_EQ(producer_result.output, "piped payload");
+  EXPECT_EQ(consumer_result.code, 20);
+  EXPECT_EQ(consumer_result.output, "piped payload");
+}
+
+TEST_F(ScopedExecutableMockTest, ServerContinuesHandlingMocksAfterCallbackException) {
+  EXPECT_NONFATAL_FAILURE({
+    auto scope = RootFilesystemFactory {root()}
+      .bind(source(), "/commands").mock("/commands/agent").create();
+    EXPECT_CALL(scope.mock("/commands/agent"), execute(_, _, _, _))
+      .WillOnce([](const auto &, int, int, int) -> int {
+        throw std::runtime_error {"first invocation failed"};
+      })
+      .WillOnce([](const auto &, int, int out, int) {
+        write_fd(out, "recovered");
+        return 55;
+      });
+    EXPECT_EQ(run_command("/commands/agent").code, 125);
+    const auto second = run_command("/commands/agent");
+    EXPECT_EQ(second.code, 55);
+    EXPECT_EQ(second.output, "recovered");
+  }, "first invocation failed");
+}
+
+TEST_F(ScopedExecutableMockTest, ConcurrentOriginalAndCustomActionsDoNotRaceOnMockState) {
+  RootFilesystemFactory factory {root()};
+  factory.bind(source(), "/commands").bind("/bin/sh")
+    .mock<::testing::NiceMock>("/commands/agent");
+  bind_libraries(factory);
+  auto scope = factory.create();
+  auto &mock = scope.mock("/commands/agent");
+
+  std::promise<void> custom_entered;
+  auto custom_ready = custom_entered.get_future().share();
+  std::promise<void> original_called;
+  auto allow_custom_return = original_called.get_future().share();
+
+  EXPECT_CALL(mock, execute(ElementsAre("/commands/agent", "native"), _, _, _))
+    .WillOnce([&](const auto &argv, int in, int out, int err) {
+      const int rc = mock.execute_original(argv, in, out, err);
+      original_called.set_value();
+      return rc;
+    });
+  EXPECT_CALL(mock, execute(ElementsAre("/commands/agent", "custom"), _, _, _))
+    .WillOnce([&](const auto &, int, int, int) {
+      custom_entered.set_value();
+      allow_custom_return.wait();
+      return 33;
+    });
+
+  auto custom_future = std::async(std::launch::async, [] {
+    return run_command("/commands/agent", {"custom"});
+  });
+  custom_ready.wait();
+  const auto native_result = run_command("/commands/agent", {"native"});
+  const auto custom_result = custom_future.get();
+  EXPECT_EQ(native_result.code, 7) << native_result.error;
+  EXPECT_EQ(native_result.output, "original:native\n");
+  EXPECT_EQ(custom_result.code, 33);
 }
 
 } // namespace

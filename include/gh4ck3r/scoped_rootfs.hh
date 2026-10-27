@@ -2,17 +2,21 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
 #include <iterator>
+#include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -32,6 +36,10 @@
 #include <sys/un.h>
 #include <gmock/gmock.h>
 #include <gh4ck3r/file.hh>
+
+#ifndef __GLIBC__
+#error "scoped_rootfs.hh requires glibc (.init_array argc/argv/envp and AT_EXECFN)"
+#endif
 
 namespace gh4ck3r::filesystem {
 
@@ -53,50 +61,33 @@ inline constexpr int timeout_seconds = 10;
   throw std::system_error {error, std::system_category(), operation};
 }
 
-inline unique_fd duplicate_fd(int fd) {
-  const int result = ::fcntl(fd, F_DUPFD_CLOEXEC, 3);
-  if (result < 0) system_error("duplicate namespace directory");
-  return unique_fd {result};
-}
-
-inline unique_fd namespace_fd(int directory) {
-  const int fd = ::openat(directory, "mnt", O_RDONLY | O_CLOEXEC);
-  if (fd < 0) system_error("open mount namespace");
-  return unique_fd {fd};
-}
-
 [[nodiscard]]
 inline bool is_subpath(const path_t& path, const path_t& base) {
   const auto rel = path.lexically_relative(base);
   return !rel.empty() && *rel.begin() != "..";
 }
 
-inline path_t logical_path(const path_t &path) {
+inline path_t validate_target_path(const path_t &path) {
+  const auto invalid_argument = [&path] (std::string msg) {
+    throw std::invalid_argument {msg + ": " + path.native()};
+  };
+
+  if (path.native().find('\0') != std::string::npos)
+    invalid_argument("malformed path");
+
+  if (std::find(path.begin(), path.end(), "..") != path.end())
+    invalid_argument("parent traversal in path");
+
   auto result = path.lexically_normal();
   if (result.filename().empty()) result = result.parent_path();
-  if (!result.is_absolute() || result == "/" ||
-      path.native().find('\0') != std::string::npos)
-    throw std::invalid_argument {"expected an absolute non-root path: " + path.string()};
-  for (const auto &part : path)
-    if (part == "..")
-      throw std::invalid_argument {"parent traversal in path: " + path.string()};
-  if (is_subpath(result, ipc_dir) || is_subpath(result, originals_dir))
-    throw std::invalid_argument {"reserved scoped root path: " + path.string()};
-  return result;
-}
+  if (!result.is_absolute() || result == "/")
+    invalid_argument("expected an absolute non-root path");
 
-inline unsigned long readonly_flags(const path_t &source) {
-  struct statvfs status {};
-  if (::statvfs(source.c_str(), &status) != 0)
-    system_error("inspect bind source " + source.string());
-  unsigned long flags = MS_BIND | MS_REMOUNT | MS_RDONLY;
-  if (status.f_flag & ST_NOSUID) flags |= MS_NOSUID;
-  if (status.f_flag & ST_NODEV) flags |= MS_NODEV;
-  if (status.f_flag & ST_NOEXEC) flags |= MS_NOEXEC;
-  if (status.f_flag & ST_NOATIME) flags |= MS_NOATIME;
-  if (status.f_flag & ST_NODIRATIME) flags |= MS_NODIRATIME;
-  if (status.f_flag & ST_RELATIME) flags |= MS_RELATIME;
-  return flags;
+  for (const auto &p : {ipc_dir, originals_dir}) {
+    if (is_subpath(result, p)) invalid_argument("reserved scoped root path");
+  }
+
+  return result;
 }
 
 inline bool send_all(int fd, const void *data, std::size_t size) noexcept {
@@ -370,6 +361,18 @@ inline std::map<path_t, path_t> runtime_files(const path_t &executable) {
   return result;
 }
 
+inline path_t fallback_runtime_path(const path_t &path) {
+  if (is_subpath(path, "/usr/lib"))
+    return path_t {"/lib"} / path.lexically_relative("/usr/lib");
+  if (is_subpath(path, "/lib"))
+    return path_t {"/usr/lib"} / path.lexically_relative("/lib");
+  if (is_subpath(path, "/usr/lib64"))
+    return path_t {"/lib64"} / path.lexically_relative("/usr/lib64");
+  if (is_subpath(path, "/lib64"))
+    return path_t {"/usr/lib64"} / path.lexically_relative("/lib64");
+  return path_t {"/lib"} / path.filename();
+}
+
 } // namespace rootfs_detail
 
 class ExecutableMock {
@@ -385,7 +388,7 @@ class ExecutableMock {
   MOCK_METHOD(int, execute, (const std::vector<std::string> &argv,
                             int stdin_fd, int stdout_fd, int stderr_fd));
   int execute_original(const std::vector<std::string> &, int, int, int) noexcept {
-    exec_original_requested_ = true;
+    exec_original_target_ = this;
     return 0;
   }
   const path_t &path() const noexcept { return target_path_; }
@@ -395,7 +398,7 @@ class ExecutableMock {
   friend class ScopedRootFilesystem;
   path_t target_path_;
   path_t orig_chroot_path_;
-  bool exec_original_requested_ = false;
+  inline static thread_local const ExecutableMock *exec_original_target_ = nullptr;
 };
 
 class RootFilesystemFactory;
@@ -422,7 +425,7 @@ class ScopedRootFilesystem {
   }
 
   ExecutableMock &mock(const path_t &target) const {
-    const auto path = rootfs_detail::logical_path(target);
+    const auto path = rootfs_detail::validate_target_path(target);
     const auto found = mocks_.find(path);
     if (found == mocks_.end())
       throw std::out_of_range {"mock not found for path: " + path.string()};
@@ -438,17 +441,35 @@ class ScopedRootFilesystem {
   };
   using Binding = std::pair<path_t, path_t>;
 
+  static unique_fd open_dir(const path_t &dir, int flags = O_PATH | O_DIRECTORY | O_CLOEXEC) {
+    const auto fd = ::open(dir.c_str(), flags);
+    if (fd == -1) rootfs_detail::system_error("open directory " + dir.string());
+    return {fd};
+  }
+
+  static unique_fd dup_namespace_dir(int fd) {
+    const auto duplicated = ::fcntl(fd, F_DUPFD_CLOEXEC, 3);
+    if (duplicated == -1) rootfs_detail::system_error("duplicate namespace directory");
+    return {duplicated};
+  }
+
+  static unique_fd open_mnt_ns(int dir_fd) {
+    const auto fd = ::openat(dir_fd, "mnt", O_RDONLY | O_CLOEXEC);
+    if (fd == -1) rootfs_detail::system_error("open mount namespace");
+    return {fd};
+  }
+
   ScopedRootFilesystem(const path_t &root, const std::vector<Binding> &bindings,
                        const std::vector<MockEntry> &mocks) :
     host_root_dir_ {std::filesystem::absolute(root).lexically_normal()},
     previous_ {active_},
-    old_root_ {::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)},
-    old_cwd_ {::open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)},
-    namespace_dir_ { previous_ ?
-        ::fcntl(previous_->namespace_dir_, F_DUPFD_CLOEXEC, 3) :
-        ::open("/proc/thread-self/ns", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    old_root_ {open_dir("/")},
+    old_cwd_ {open_dir(".")},
+    namespace_dir_ {previous_ ?
+        dup_namespace_dir(previous_->namespace_dir_) :
+        open_dir("/proc/thread-self/ns", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
     },
-    old_mnt_ns_ {rootfs_detail::namespace_fd(namespace_dir_)}
+    old_mnt_ns_ {open_mnt_ns(namespace_dir_)}
   {
     namespace fs = std::filesystem;
     if (fs::exists(host_root_dir_))
@@ -467,20 +488,48 @@ class ScopedRootFilesystem {
       if (::unshare(CLONE_NEWNS) != 0)
         rootfs_detail::system_error("create scoped mount namespace");
       namespace_active_ = true;
-      private_root_.emplace(::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+      private_root_.emplace(open_dir("/"));
       // An outer scope already made the tree private. Its chroot need not be a
       // mountpoint, so MS_PRIVATE on "/" cannot be repeated in a nested scope.
       if (!previous_ && ::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0)
         rootfs_detail::system_error("make scoped mounts private");
 
-      for (const auto &binding : bindings) {
+      auto sorted_bindings = bindings;
+      std::sort(sorted_bindings.begin(), sorted_bindings.end(),
+                [](const Binding &lhs, const Binding &rhs) {
+                  return lhs.second < rhs.second;
+                });
+      for (const auto &binding : sorted_bindings) {
         const auto source = fs::canonical(binding.first);
         bind_readonly(source, target(binding.second, fs::is_directory(source)));
       }
-      for (const auto &[path, source] : runtime_files_) {
-        const auto destination = host_root_dir_ / path.relative_path();
-        if (fs::exists(destination)) continue;
-        bind_readonly(fs::canonical(source), target(path, false));
+      const auto is_under_binding = [&](const path_t &logical) {
+        return std::any_of(sorted_bindings.begin(), sorted_bindings.end(),
+            [&](const Binding &binding) {
+              return logical == binding.second ||
+                     rootfs_detail::is_subpath(logical, binding.second);
+            });
+      };
+      const auto initial_runtime = std::move(runtime_files_);
+      runtime_files_.clear();
+      for (const auto &[path, source] : initial_runtime) {
+        auto logical = path;
+        auto destination = host_root_dir_ / logical.relative_path();
+        if (fs::exists(fs::symlink_status(destination))) {
+          runtime_files_.emplace(path, logical);
+          continue;
+        }
+        if (is_under_binding(logical)) {
+          logical = rootfs_detail::fallback_runtime_path(path);
+          destination = host_root_dir_ / logical.relative_path();
+          if (fs::exists(fs::symlink_status(destination))) {
+            runtime_files_.emplace(path, logical);
+            continue;
+          }
+          if (is_under_binding(logical)) continue;
+        }
+        bind_readonly(fs::canonical(source), target(logical, false));
+        runtime_files_.emplace(path, logical);
       }
       bind_readonly(executable, target(rootfs_detail::runner_path, false));
       setup_mocks(mocks);
@@ -528,8 +577,22 @@ class ScopedRootFilesystem {
     return path;
   }
 
+  inline static unsigned long readonly_flags(const path_t &source) {
+    struct statvfs status {};
+    if (::statvfs(source.c_str(), &status) != 0)
+      rootfs_detail::system_error("inspect bind source " + source.string());
+    unsigned long flags = MS_BIND | MS_REMOUNT | MS_RDONLY;
+    if (status.f_flag & ST_NOSUID) flags |= MS_NOSUID;
+    if (status.f_flag & ST_NODEV) flags |= MS_NODEV;
+    if (status.f_flag & ST_NOEXEC) flags |= MS_NOEXEC;
+    if (status.f_flag & ST_NOATIME) flags |= MS_NOATIME;
+    if (status.f_flag & ST_NODIRATIME) flags |= MS_NODIRATIME;
+    if (status.f_flag & ST_RELATIME) flags |= MS_RELATIME;
+    return flags;
+  }
+
   void bind_readonly(const path_t &source, const path_t &destination) {
-    const auto flags = rootfs_detail::readonly_flags(source);
+    const auto flags = readonly_flags(source);
     mounts_.push_back(destination);
     if (::mount(source.c_str(), destination.c_str(), nullptr, MS_BIND, nullptr) != 0) {
       mounts_.pop_back();
@@ -596,20 +659,62 @@ class ScopedRootFilesystem {
     }
   }
 
+  struct ClientWorker {
+    std::thread thread;
+    std::atomic<bool> done {false};
+  };
+
+  void record_worker_error(std::exception_ptr error) noexcept {
+    std::lock_guard<std::mutex> lock {worker_mutex_};
+    worker_errors_.push_back(std::move(error));
+  }
+
   void ipc_loop() {
-    for (;;) {
-      pollfd events[] {{*listen_sock_, POLLIN, 0}, {*stop_pipe_r_, POLLIN, 0}};
-      const int ready = ::poll(events, 2, -1);
-      if (ready < 0 && errno == EINTR) continue;
-      if (ready < 0) rootfs_detail::system_error("poll mock listener");
-      if (events[1].revents & POLLIN) return;
-      if (!(events[0].revents & POLLIN))
-        throw std::runtime_error {"unexpected mock listener event"};
-      const int fd = ::accept4(*listen_sock_, nullptr, nullptr, SOCK_CLOEXEC);
-      if (fd < 0 && errno == EINTR) continue;
-      if (fd < 0) rootfs_detail::system_error("accept mock client");
-      handle_client(unique_fd {fd});
+    std::list<ClientWorker> clients;
+    const auto reap_clients = [&](bool wait_all) noexcept {
+      for (auto it = clients.begin(); it != clients.end();) {
+        if (wait_all || it->done.load(std::memory_order_acquire)) {
+          if (it->thread.joinable()) it->thread.join();
+          it = clients.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    };
+    try {
+      for (;;) {
+        reap_clients(false);
+        pollfd events[] {{*listen_sock_, POLLIN, 0}, {*stop_pipe_r_, POLLIN, 0}};
+        const int ready = ::poll(events, 2, -1);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready < 0) rootfs_detail::system_error("poll mock listener");
+        if (events[1].revents & POLLIN) break;
+        if (!(events[0].revents & POLLIN))
+          throw std::runtime_error {"unexpected mock listener event"};
+        const int fd = ::accept4(*listen_sock_, nullptr, nullptr, SOCK_CLOEXEC);
+        if (fd < 0 && errno == EINTR) continue;
+        if (fd < 0) rootfs_detail::system_error("accept mock client");
+        auto &worker = clients.emplace_back();
+        try {
+          worker.thread = std::thread {[this, &worker, client = unique_fd {fd}]() mutable noexcept {
+            try {
+              handle_client(std::move(client));
+            } catch (...) {
+              record_worker_error(std::current_exception());
+            }
+            worker.done.store(true, std::memory_order_release);
+          }};
+        } catch (...) {
+          clients.pop_back();
+          throw;
+        }
+      }
+    } catch (...) {
+      reap_clients(true);
+      record_worker_error(std::current_exception());
+      return;
     }
+    reap_clients(true);
   }
 
   void handle_client(unique_fd client) {
@@ -689,11 +794,11 @@ class ScopedRootFilesystem {
       }
       auto &mock = *found->second;
       argv.front() = mock.path().string();
-      mock.exec_original_requested_ = false;
+      ExecutableMock::exec_original_target_ = nullptr;
       rootfs_detail::Response response;
       response.code = mock.execute(argv, passed.descriptors[0],
                                    passed.descriptors[1], passed.descriptors[2]);
-      if (mock.exec_original_requested_) {
+      if (ExecutableMock::exec_original_target_ == &mock && response.code == 0) {
         const auto original = mock.original_path().string();
         if (original.size() >= sizeof(response.original))
           throw std::runtime_error {"mock executable path is too long"};
@@ -749,14 +854,24 @@ class ScopedRootFilesystem {
   }
 
   void report_worker_error() noexcept {
-    if (!worker_result_.valid()) return;
-    try {
-      worker_result_.get();
-    } catch (const std::exception &error) {
-      ADD_FAILURE() << "mock callback/IPC failure: " << error.what();
-    } catch (...) {
-      ADD_FAILURE() << "mock callback/IPC failure: unknown exception";
+    if (worker_result_.valid()) {
+      try {
+        worker_result_.get();
+      } catch (...) {
+        record_worker_error(std::current_exception());
+      }
     }
+    std::lock_guard<std::mutex> lock {worker_mutex_};
+    for (const auto &error_ptr : worker_errors_) {
+      try {
+        std::rethrow_exception(error_ptr);
+      } catch (const std::exception &error) {
+        ADD_FAILURE() << "mock callback/IPC failure: " << error.what();
+      } catch (...) {
+        ADD_FAILURE() << "mock callback/IPC failure: unknown exception";
+      }
+    }
+    worker_errors_.clear();
   }
 
   inline static thread_local ScopedRootFilesystem *active_ = nullptr;
@@ -776,6 +891,8 @@ class ScopedRootFilesystem {
   std::optional<unique_fd> stop_pipe_w_;
   std::thread ipc_thread_;
   std::future<void> worker_result_;
+  std::mutex worker_mutex_;
+  std::vector<std::exception_ptr> worker_errors_;
   bool owned_ = false;
   bool namespace_active_ = false;
   bool entered_ = false;
@@ -793,7 +910,7 @@ class RootFilesystemFactory {
     if (!source.is_absolute() || source.native().find('\0') != std::string::npos)
       throw std::invalid_argument {"bind source must be absolute"};
     if (destination.empty()) destination = source;
-    destination = rootfs_detail::logical_path(destination);
+    destination = rootfs_detail::validate_target_path(destination);
     for (const auto &binding : binds_)
       if (binding.second == destination)
         throw std::invalid_argument {"duplicate bind destination: " + destination.string()};
@@ -803,7 +920,7 @@ class RootFilesystemFactory {
 
   template <template <typename> class MockType = ::testing::StrictMock>
   RootFilesystemFactory &mock(const path_t &path) {
-    const auto target = rootfs_detail::logical_path(path);
+    const auto target = rootfs_detail::validate_target_path(path);
     for (const auto &entry : mocks_)
       if (entry.target == target)
         throw std::invalid_argument {"duplicate mock target: " + target.string()};

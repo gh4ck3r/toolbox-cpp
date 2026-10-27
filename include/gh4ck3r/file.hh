@@ -15,6 +15,10 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#if __cpp_lib_chrono >= 201907
+#include <chrono>
+#endif
+
 namespace gh4ck3r::filesystem {
 using namespace std::filesystem;
 using path_t = std::filesystem::path;

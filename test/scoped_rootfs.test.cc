@@ -15,8 +15,8 @@
 namespace {
 
 namespace fs = std::filesystem;
-using gh4ck3r::filesystem::ExecutableMock;
-using gh4ck3r::filesystem::RootFilesystemFactory;
+using gh4ck3r::filesystem::scoped_rootfs::mock::Executable;
+using gh4ck3r::filesystem::scoped_rootfs::RootFilesystemFactory;
 using gh4ck3r::filesystem::TempDir;
 using gh4ck3r::filesystem::unique_fd;
 using ::testing::_;
@@ -395,7 +395,7 @@ TEST_F(ScopedExecutableMockTest, CallbackOnceThenOriginalPreservesTheSource) {
     auto scope = factory.create();
     auto &mock = scope.mock("/commands/agent");
     EXPECT_CALL(mock, execute(_, _, _, _)).Times(::testing::AnyNumber())
-      .WillRepeatedly(Invoke(&mock, &ExecutableMock::execute_original));
+      .WillRepeatedly(Invoke(&mock, &Executable::execute_original));
     EXPECT_CALL(mock, execute(ElementsAre("/commands/agent", "argument"), _, _, _))
       .WillOnce(Return(19)).RetiresOnSaturation();
     EXPECT_EQ(run_command("/commands/agent", {"argument"}).code, 19);
@@ -515,7 +515,7 @@ TEST_F(ScopedExecutableMockTest, UnregisteredExecutableDoesNotBecomeAMock) {
   auto scope = RootFilesystemFactory {root()}
     .bind(source(), "/commands").mock("/commands/agent").create();
   EXPECT_CALL(scope.mock("/commands/agent"), execute(_, _, _, _)).Times(0);
-  const auto result = run_command("/.mock_ipc/runner",
+  const auto result = run_command("/.mock_ipc/stub",
       {"--gtest_list_tests", "--gtest_filter=ScopedRootFilesystemValidation.*"});
   EXPECT_EQ(result.code, 0) << result.error;
   EXPECT_NE(result.output.find("ScopedRootFilesystemValidation."), std::string::npos);
@@ -532,12 +532,12 @@ TEST_F(ScopedExecutableMockTest, MalformedClientIsReportedWithoutLosingRestorati
     address.sun_family = AF_UNIX;
     std::strncpy(address.sun_path, "/.mock_ipc/sock", sizeof(address.sun_path) - 1);
     EXPECT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
-    EXPECT_TRUE(gh4ck3r::filesystem::rootfs_detail::set_timeouts(client));
-    const auto header = (gh4ck3r::filesystem::rootfs_detail::RequestHeader {
-      gh4ck3r::filesystem::rootfs_detail::protocol_magic, 1, 1});
-    EXPECT_TRUE(gh4ck3r::filesystem::rootfs_detail::send_all(client, &header, sizeof(header)));
-    gh4ck3r::filesystem::rootfs_detail::Response response;
-    EXPECT_TRUE(gh4ck3r::filesystem::rootfs_detail::read_all(client, &response, sizeof(response)));
+    EXPECT_TRUE(gh4ck3r::filesystem::scoped_rootfs::mock::set_timeouts(client));
+    const auto header = (gh4ck3r::filesystem::scoped_rootfs::mock::RequestHeader {
+      gh4ck3r::filesystem::scoped_rootfs::mock::protocol_magic, 1, 1});
+    EXPECT_TRUE(gh4ck3r::filesystem::scoped_rootfs::mock::send_all(client, &header, sizeof(header)));
+    gh4ck3r::filesystem::scoped_rootfs::mock::Response response;
+    EXPECT_TRUE(gh4ck3r::filesystem::scoped_rootfs::mock::read_all(client, &response, sizeof(response)));
     EXPECT_EQ(response.code, 125);
   }, "invalid mock IPC descriptors");
 }

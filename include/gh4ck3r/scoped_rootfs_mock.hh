@@ -255,9 +255,23 @@ class IpcServer {
     }
   }
 
-  void start(ExecutableMap &mocks) {
-    if (mocks_) throw std::logic_error {"mock IPC server already started"};
-    mocks_ = &mocks;
+  void emplace(path_t target, std::unique_ptr<Executable> executable) {
+    if (thread_.joinable() || listen_sock_)
+      throw std::logic_error {"mock IPC server already started"};
+    mocks_.emplace(std::move(target), std::move(executable));
+  }
+
+  Executable &mock(const path_t &executable) const {
+    const auto found = mocks_.find(executable);
+    if (found == mocks_.end())
+      throw std::out_of_range {"mock not found for path: " + executable.string()};
+    return *found->second;
+  }
+
+  void start() {
+    if (mocks_.empty()) return;
+    if (thread_.joinable() || listen_sock_)
+      throw std::logic_error {"mock IPC server already started"};
 
     const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) system_error("create mock listener");
@@ -314,7 +328,7 @@ class IpcServer {
   }
 
  private:
-  void handle_client(unique_fd client, ExecutableMap &map);
+  void handle_client(unique_fd client);
 
   struct ClientWorker {
     std::thread thread;
@@ -359,7 +373,7 @@ class IpcServer {
         try {
           worker.thread = std::thread {[this, &worker, client = unique_fd {fd}]() mutable noexcept {
             try {
-              handle_client(std::move(client), *mocks_);
+              handle_client(std::move(client));
             } catch (...) {
               record_worker_error(std::current_exception());
             }
@@ -378,7 +392,7 @@ class IpcServer {
     reap_clients(true);
   }
 
-  ExecutableMap *mocks_ = nullptr;
+  ExecutableMap mocks_;
   std::optional<unique_fd> listen_sock_;
   std::optional<unique_fd> stop_pipe_r_;
   std::optional<unique_fd> stop_pipe_w_;
@@ -389,7 +403,7 @@ class IpcServer {
   bool socket_owned_ = false;
 };
 
-inline void IpcServer::handle_client(unique_fd client, ExecutableMap &map)
+inline void IpcServer::handle_client(unique_fd client)
 try {
   if (!set_timeouts(client))
     system_error("set mock IPC timeout");
@@ -447,8 +461,8 @@ try {
   if (!read_all(client, command.data(), command.size()) ||
       command.front() != '/' || command.find('\0') != std::string::npos)
     throw std::runtime_error {"invalid mock command path"};
-  const auto found = map.find(command);
-  if (found == map.end())
+  const auto found = mocks_.find(command);
+  if (found == mocks_.end())
     throw std::runtime_error {"unregistered mock command: " + command};
   std::vector<std::string> argv;
   std::size_t total = header.command_size;

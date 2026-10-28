@@ -283,37 +283,28 @@ TEST_F(ScopedRootFilesystemTest, RejectsDestinationSymlinksWithoutFollowingThem)
   EXPECT_EQ(contents(canary), "do not truncate");
 }
 
-TEST_F(ScopedRootFilesystemTest, NestedScopesRestoreThePreviousRoot) {
-  write_file(source() / "file", "outer source");
-  {
-    auto outer = RootFilesystemFactory {root()}.bind(source(), "/visible").create();
-    write_file("/outer-marker", "outer");
-    {
-      auto inner = RootFilesystemFactory {"/inner"}
-        .bind("/visible", "/inner-visible").create();
-      EXPECT_EQ(contents("/inner-visible/file"), "outer source");
-      EXPECT_FALSE(fs::exists("/outer-marker"));
-      write_file("/inner-marker", "inner");
-    }
-    EXPECT_EQ(contents("/outer-marker"), "outer");
-    EXPECT_FALSE(fs::exists("/inner"));
-    EXPECT_FALSE(fs::exists("/inner-marker"));
-  }
+TEST_F(ScopedRootFilesystemTest, RejectsNestedScopeOnSameThread) {
+  auto outer = RootFilesystemFactory {root()}.create();
+  write_file("/outer-marker", "outer");
+  EXPECT_THROW((void)RootFilesystemFactory {"/inner"}.create(), std::logic_error);
+  EXPECT_EQ(contents("/outer-marker"), "outer");
+  EXPECT_FALSE(fs::exists("/inner"));
 }
 
 TEST_F(ScopedRootFilesystemTest, DirectoryBindsDoNotIncludeWritableSubmounts) {
-  auto outer = RootFilesystemFactory {root()}.create();
-  write_file("/source/child/underlying", "underlying");
-  ASSERT_EQ(::mount("tmpfs", "/source/child", "tmpfs", 0, "size=1m"), 0);
+  const auto child = source() / "child";
+  write_file(child / "underlying", "underlying");
+  ASSERT_EQ(::mount("tmpfs", child.c_str(), "tmpfs", 0, "size=1m"), 0);
   struct MountedChild {
+    fs::path target;
     ~MountedChild() {
-      if (::umount2("/source/child", 0) != 0)
+      if (::umount2(target.c_str(), 0) != 0)
         ADD_FAILURE() << "unmount test child: " << std::strerror(errno);
     }
-  } mounted;
-  write_file("/source/child/mounted", "mounted");
+  } mounted {child};
+  write_file(child / "mounted", "mounted");
   {
-    auto inner = RootFilesystemFactory {"/inner"}.bind("/source", "/visible").create();
+    auto scope = RootFilesystemFactory {root()}.bind(source(), "/visible").create();
     EXPECT_EQ(contents("/visible/child/underlying"), "underlying");
     EXPECT_FALSE(fs::exists("/visible/child/mounted"));
   }
@@ -493,22 +484,6 @@ TEST_F(ScopedExecutableMockTest, RepeatedScopesDoNotRetainMockActions) {
       .WillOnce(Return(20 + i));
     EXPECT_EQ(run_command("/commands/agent").code, 20 + i);
   }
-}
-
-TEST_F(ScopedExecutableMockTest, NestedMocksRestoreTheOuterServerAndExpectations) {
-  auto outer = RootFilesystemFactory {root()}
-    .bind(source(), "/commands").mock("/commands/agent").create();
-  EXPECT_CALL(outer.mock("/commands/agent"), execute(_, _, _, _))
-    .Times(2).WillRepeatedly(Return(11));
-  EXPECT_EQ(run_command("/commands/agent").code, 11);
-  {
-    auto inner = RootFilesystemFactory {"/inner"}
-      .bind("/commands").mock("/commands/agent").create();
-    EXPECT_CALL(inner.mock("/commands/agent"), execute(_, _, _, _))
-      .WillOnce(Return(22));
-    EXPECT_EQ(run_command("/commands/agent").code, 22);
-  }
-  EXPECT_EQ(run_command("/commands/agent").code, 11);
 }
 
 TEST_F(ScopedExecutableMockTest, UnregisteredExecutableDoesNotBecomeAMock) {

@@ -37,6 +37,7 @@ inline bool is_valid(const fd_t fd) {
 
 class unique_fd {
  public:
+  unique_fd() : fd_(uninitialized) {}
   unique_fd(fd_t fd) : fd_(fd) {
     if (!is_valid(fd_)) throw std::invalid_argument {
       "unique_fd: invalid fd: " + std::to_string(fd_)};
@@ -51,7 +52,6 @@ class unique_fd {
   }
   ~unique_fd() noexcept { close(fd_); }
 
-  unique_fd() = delete;
   unique_fd(const unique_fd&) = delete;
   unique_fd& operator=(const unique_fd&) = delete;
 
@@ -59,12 +59,15 @@ class unique_fd {
   explicit operator bool() const { return is_valid(fd_); }
 
  private:
-  static void close(fd_t fd) noexcept {
-    if (fd < 0) return;
+  friend inline void close(unique_fd &ufd) {
+    if (ufd.fd_ <= uninitialized) return;
+
     int rv;
-    do {
-      rv = ::close(fd);
-    } while (rv == -1 && errno == EINTR);
+    do rv = ::close(ufd.fd_); while (rv == -1 && errno == EINTR);
+    if (rv && errno != EBADF) [[unlikely]]
+      throw std::system_error {errno, std::system_category(), "close unique_fd"};
+
+    ufd.fd_ = uninitialized;
   }
 
  private:
@@ -411,3 +414,5 @@ class ScopedRootDir {
 };
 
 } // namespace gh4ck3r::filesystem
+
+int close(const gh4ck3r::filesystem::unique_fd &) = delete;

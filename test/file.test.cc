@@ -62,6 +62,35 @@ TEST(unique_fd, self_assignment)
   EXPECT_FALSE(is_valid(fd));
 }
 
+TEST(unique_fd, default_ctor)
+{
+  unique_fd ufd;
+  EXPECT_FALSE(ufd);
+
+  constexpr auto no_file = "\0";
+  ASSERT_FALSE(exists(path_t{no_file}));
+  try {
+    ufd = ::open(no_file, O_RDONLY);
+    ADD_FAILURE();
+  } catch (const std::invalid_argument &e) {
+    SUCCEED();
+  } catch (...) {
+    ADD_FAILURE();
+  }
+}
+
+TEST(unique_fd, close)
+{
+  unique_fd ufd {::open(__FILE__, O_RDONLY)};
+  EXPECT_TRUE(ufd);
+#if COMPILE_ERROR
+  ::close(ufd);
+#else
+  close(ufd);
+#endif
+  EXPECT_FALSE(ufd);
+}
+
 TEST(create_tempfile, default)
 {
   const auto [fd, path] = create_tempfile();

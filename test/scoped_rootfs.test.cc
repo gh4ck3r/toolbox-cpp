@@ -24,6 +24,16 @@ using ::testing::ElementsAre;
 using ::testing::Invoke;
 using ::testing::Return;
 
+template <typename Base>
+class FailingMock : public Base {
+ public:
+  FailingMock(fs::path command, fs::path original) :
+    Base {std::move(command), std::move(original)}
+  {
+    throw std::runtime_error {"injected mock construction failure"};
+  }
+};
+
 bool has_required_caps() {
   __user_cap_header_struct header {};
   header.version = _LINUX_CAPABILITY_VERSION_3;
@@ -126,6 +136,26 @@ TEST(ScopedRootFilesystemValidation, ExistingRootIsNotOwnedOrModified) {
   write_file(directory.path() / "keep", "existing data");
   EXPECT_THROW((void)RootFilesystemFactory {directory.path()}.create(), std::invalid_argument);
   EXPECT_EQ(contents(directory.path() / "keep"), "existing data");
+}
+
+TEST(ScopedRootFilesystemValidation, ContextReservesThreadUntilDestruction) {
+  using gh4ck3r::filesystem::scoped_rootfs::detail::FilesystemContext;
+  TempDir directory {"rootfs-reservation"};
+  const auto root = directory.path() / "root";
+  {
+    FilesystemContext context {root};
+    EXPECT_THROW((void)FilesystemContext {root}, std::logic_error);
+    context.restore();
+    EXPECT_THROW((void)FilesystemContext {root}, std::logic_error);
+  }
+  EXPECT_NO_THROW((void)FilesystemContext {root});
+}
+
+TEST(ScopedRootFilesystemValidation, FailedContextConstructionReleasesThreadReservation) {
+  using gh4ck3r::filesystem::scoped_rootfs::detail::FilesystemContext;
+  TempDir directory {"rootfs-reservation-failure"};
+  EXPECT_THROW((void)FilesystemContext {directory.path()}, std::invalid_argument);
+  EXPECT_NO_THROW((void)FilesystemContext {directory.path() / "root"});
 }
 
 class ScopedRootFilesystemTest : public ::testing::Test {
@@ -258,8 +288,11 @@ TEST_F(ScopedRootFilesystemTest, ChildBindRegisteredBeforeParentIsNotShadowed) {
 
 TEST_F(ScopedRootFilesystemTest, MissingNamespaceDirectoryReportsSystemError) {
   fs::create_directories(source());
-  gh4ck3r::filesystem::ScopedRootDir chroot_guard {source()};
-  EXPECT_THROW((void)RootFilesystemFactory {"/scoped"}.create(), std::system_error);
+  {
+    gh4ck3r::filesystem::ScopedRootDir chroot_guard {source()};
+    EXPECT_THROW((void)RootFilesystemFactory {"/scoped"}.create(), std::system_error);
+  }
+  auto scope = RootFilesystemFactory {root()}.create();
 }
 
 TEST_F(ScopedRootFilesystemTest, RollsBackAPartiallyConstructedRoot) {
@@ -268,6 +301,16 @@ TEST_F(ScopedRootFilesystemTest, RollsBackAPartiallyConstructedRoot) {
       .bind(source(), "/readonly")
       .bind(source() / "missing", "/missing").create(), fs::filesystem_error);
   EXPECT_EQ(contents(source() / "file"), "original");
+}
+
+TEST_F(ScopedRootFilesystemTest, RootCreatedBeforePreparationIsNotOwnedOrRemoved) {
+  gh4ck3r::filesystem::scoped_rootfs::detail::FilesystemContext context {source()};
+  write_file(source() / "keep", "not owned");
+  EXPECT_THROW(context.prepare(), std::invalid_argument);
+  context.leave();
+  context.restore();
+  EXPECT_FALSE(context.remove_root());
+  EXPECT_EQ(contents(source() / "keep"), "not owned");
 }
 
 TEST_F(ScopedRootFilesystemTest, RejectsDestinationSymlinksWithoutFollowingThem) {
@@ -522,6 +565,21 @@ TEST_F(ScopedExecutableMockTest, MissingMockTargetRollsBackAllBindings) {
       .mock("/commands/missing").create(), std::invalid_argument);
   EXPECT_EQ(contents(source() / "agent"),
             "#!/bin/sh\nprintf 'original:%s\\n' \"$1\"\nexit 7\n");
+}
+
+TEST_F(ScopedExecutableMockTest, MockConstructionFailureRestoresFilesystemAndAllowsAnotherScope) {
+  const auto original = contents(source() / "agent");
+  EXPECT_THROW((void)RootFilesystemFactory {root()}.bind(source(), "/commands")
+      .mock<FailingMock>("/commands/agent").create(), std::runtime_error);
+  EXPECT_EQ(fs::current_path(), cwd_);
+  EXPECT_FALSE(fs::exists(root()));
+  EXPECT_EQ(contents(source() / "agent"), original);
+  struct stat current {};
+  ASSERT_EQ(::stat("/proc/thread-self/ns/mnt", &current), 0);
+  EXPECT_EQ(current.st_dev, namespace_.st_dev);
+  EXPECT_EQ(current.st_ino, namespace_.st_ino);
+  auto scope = RootFilesystemFactory {root()}.create();
+  EXPECT_EQ(fs::current_path(), "/");
 }
 
 TEST_F(ScopedExecutableMockTest, CustomDirectoryBoundOverRuntimeLibraryPrefixSupportsMocks) {

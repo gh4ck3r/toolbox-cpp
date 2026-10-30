@@ -31,6 +31,11 @@ set_property(TARGET gh4ck3r APPEND PROPERTY PUBLIC_HEADER
   include/gh4ck3r/reaper.hh
   include/gh4ck3r/recipe.hh
   include/gh4ck3r/scoped_rootfs.hh
+  include/gh4ck3r/scoped_rootfs_binder.hh
+  include/gh4ck3r/scoped_rootfs_elf.hh
+  include/gh4ck3r/scoped_rootfs_filesystem.hh
+  include/gh4ck3r/scoped_rootfs_mock.hh
+  include/gh4ck3r/scoped_rootfs_mock_environment.hh
   include/gh4ck3r/singleton.hh
   include/gh4ck3r/split.hh
   include/gh4ck3r/typemap.hh

@@ -10,11 +10,12 @@
 #include <unistd.h>
 #include <sys/mount.h>
 #include <gh4ck3r/file.hh>
+#include <gh4ck3r/singleton.hh>
 
 namespace gh4ck3r::filesystem::scoped_rootfs::detail {
 
 // ScopedRootFilesystem coordinates leave(), unmounts, restore(), and removal.
-class FilesystemContext {
+class FilesystemContext : ThreadSingleton<FilesystemContext> {
  public:
   explicit FilesystemContext(const path_t &root) :
     root_path_ {validate_root(root)},
@@ -92,7 +93,7 @@ class FilesystemContext {
   }
 
   void assert_owner() const {
-    if (owner_ != std::this_thread::get_id())
+    if (owner() != std::this_thread::get_id())
       throw std::runtime_error {"scoped root destroyed on a different thread"};
   }
 
@@ -109,23 +110,6 @@ class FilesystemContext {
   }
 
  private:
-  class ActiveReservation {
-   public:
-    ActiveReservation() {
-      if (active_)
-        throw std::logic_error {"scoped root is already active on this thread"};
-      active_ = true;
-    }
-
-    ActiveReservation(const ActiveReservation &) = delete;
-    ActiveReservation &operator=(const ActiveReservation &) = delete;
-
-    ~ActiveReservation() noexcept { active_ = false; }
-
-   private:
-    inline static thread_local bool active_ = false;
-  };
-
   static path_t validate_root(const path_t &root) {
     auto dir = std::filesystem::absolute(root).lexically_normal();
     if (std::filesystem::exists(std::filesystem::symlink_status(dir)))
@@ -158,8 +142,6 @@ class FilesystemContext {
     return promote_fd(fd);
   }
 
-  ActiveReservation reservation_;
-  std::thread::id owner_ = std::this_thread::get_id();
   path_t root_path_;
   unique_fd host_root_;
   unique_fd host_cwd_;

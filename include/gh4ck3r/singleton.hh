@@ -3,6 +3,8 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
+#include <cassert>
 
 namespace gh4ck3r {
 namespace singleton {
@@ -90,9 +92,32 @@ class StaticSingleton final : public T, private SingletonTraits {
   }
 };
 
+template <typename T>
+class ThreadSingleton {
+  static inline thread_local bool created_ = false;
+  std::thread::id owner_ = std::this_thread::get_id();
+ protected:
+  ThreadSingleton() {
+    if (created_) throw std::logic_error {
+      std::string{"ThreadSingleton: "} + typeid(T).name() + " exists already"
+    };
+    created_ = true;
+  }
+  ~ThreadSingleton() noexcept {
+    assert(std::this_thread::get_id() == owner_);
+    created_ = false;
+  }
+  ThreadSingleton(const ThreadSingleton&) = delete;
+  ThreadSingleton &operator=(const ThreadSingleton&) = delete;
+  ThreadSingleton(ThreadSingleton&&) = delete;
+  ThreadSingleton &operator=(ThreadSingleton&&) = delete;
+
+  const std::thread::id &owner() const { return owner_; }
+};
 } // namespace singleton
 
 using singleton::SharedSingleton;
 using singleton::StaticSingleton;
+using singleton::ThreadSingleton;
 
 } // namespace gh4ck3r

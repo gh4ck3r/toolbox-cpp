@@ -1,5 +1,7 @@
 #pragma once
 #include <algorithm>
+#include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <iterator>
 #include <stdexcept>
@@ -19,20 +21,23 @@ class ReadonlyBinder {
  public:
   using Binding = std::pair<path_t, path_t>;
 
-  explicit ReadonlyBinder(FilesystemContext &filesystem) : filesystem_ {filesystem} {}
-  ReadonlyBinder(const ReadonlyBinder &) = delete;
-  ReadonlyBinder &operator=(const ReadonlyBinder &) = delete;
-
-  void apply(const std::vector<Binding> &bindings) {
-    filesystem_.require_preparing();
-    bindings_ = bindings;
-    std::sort(bindings_.begin(), bindings_.end(),
-              [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
-    for (const auto &[source, logical] : bindings_) {
-      const auto canonical = std::filesystem::canonical(source);
-      bind_readonly(canonical, target(logical, std::filesystem::is_directory(canonical)));
+  ReadonlyBinder(FilesystemContext &filesystem, const std::vector<Binding> &bindings) :
+    filesystem_ {filesystem}
+  {
+    try {
+      apply(bindings);
+    } catch (...) {
+      cleanup("rollback scoped bindings");
+      throw;
     }
   }
+
+  ~ReadonlyBinder() noexcept {
+    cleanup("unbind scoped bindings");
+  }
+
+  ReadonlyBinder(const ReadonlyBinder &) = delete;
+  ReadonlyBinder &operator=(const ReadonlyBinder &) = delete;
 
   bool under_binding(const path_t &logical) const {
     return std::any_of(bindings_.begin(), bindings_.end(),
@@ -82,17 +87,6 @@ class ReadonlyBinder {
       system_error("make bind read-only " + destination.string());
   }
 
-  void unbind() {
-    if (mounts_.empty()) return;
-    filesystem_.require_mount_access();
-    while (!mounts_.empty()) {
-      const auto &target = mounts_.back();
-      if (::umount2(target.c_str(), 0) != 0)
-        system_error("unmount scoped bind " + target.string());
-      mounts_.pop_back();
-    }
-  }
-
   static bool is_subpath(const path_t &path, const path_t &base) {
     const auto rel = path.lexically_relative(base);
     return !rel.empty() && *rel.begin() != "..";
@@ -114,6 +108,36 @@ class ReadonlyBinder {
   }
 
  private:
+  void apply(const std::vector<Binding> &bindings) {
+    filesystem_.require_preparing();
+    bindings_ = bindings;
+    std::sort(bindings_.begin(), bindings_.end(),
+              [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
+    for (const auto &[source, logical] : bindings_) {
+      const auto canonical = std::filesystem::canonical(source);
+      bind_readonly(canonical, target(logical, std::filesystem::is_directory(canonical)));
+    }
+  }
+
+  void unbind() {
+    if (mounts_.empty()) return;
+    filesystem_.require_mount_access();
+    while (!mounts_.empty()) {
+      const auto &target = mounts_.back();
+      if (::umount2(target.c_str(), 0) != 0)
+        system_error("unmount scoped bind " + target.string());
+      mounts_.pop_back();
+    }
+  }
+
+  void cleanup(const char *msg) noexcept {
+    try {
+      unbind();
+    } catch (const std::exception &error) {
+      std::fprintf(stderr, "%s: %s\n", msg, error.what());
+      std::terminate();
+    }
+  }
   [[noreturn]]
   static void system_error(const std::string &operation, int error = errno) {
     throw std::system_error {error, std::system_category(), operation};

@@ -15,8 +15,33 @@ namespace gh4ck3r::filesystem::scoped_rootfs::detail {
 
 class MockEnvironment {
  public:
-  explicit MockEnvironment(ReadonlyBinder &binder) : binder_ {binder} {}
+  MockEnvironment(ReadonlyBinder &binder, const std::vector<mock::Entry> &entries) :
+    binder_ {binder}
+  {
+    prepare(entries);
+  }
 
+  void start() { server_.start(); }
+  void stop() { server_.stop(); }
+
+  mock::Executable &mock(const path_t &executable) const {
+    return server_.mock(validate_path(executable));
+  }
+
+  std::vector<std::exception_ptr> take_worker_errors() {
+    return server_.take_worker_errors();
+  }
+
+  static path_t validate_path(const path_t &path) {
+    const auto result = ReadonlyBinder::validate_path(path);
+    for (const auto &p : {mock::ipc_dir, mock::originals_dir}) {
+      if (ReadonlyBinder::is_subpath(result, p))
+        throw std::invalid_argument {"reserved scoped root path: " + path.native()};
+    }
+    return result;
+  }
+
+ private:
   void prepare(const std::vector<mock::Entry> &entries) {
     if (entries.empty()) return;
     namespace fs = std::filesystem;
@@ -45,28 +70,6 @@ class MockEnvironment {
       server_.emplace(entry.target, entry.builder(entry.target, original));
     }
   }
-
-  void start() { server_.start(); }
-  void stop() { server_.stop(); }
-
-  mock::Executable &mock(const path_t &executable) const {
-    return server_.mock(validate_path(executable));
-  }
-
-  std::vector<std::exception_ptr> take_worker_errors() {
-    return server_.take_worker_errors();
-  }
-
-  static path_t validate_path(const path_t &path) {
-    const auto result = ReadonlyBinder::validate_path(path);
-    for (const auto &p : {mock::ipc_dir, mock::originals_dir}) {
-      if (ReadonlyBinder::is_subpath(result, p))
-        throw std::invalid_argument {"reserved scoped root path: " + path.native()};
-    }
-    return result;
-  }
-
- private:
   static path_t fallback_runtime_path(const path_t &path) {
     if (ReadonlyBinder::is_subpath(path, "/usr/lib"))
       return path_t {"/lib"} / path.lexically_relative("/usr/lib");

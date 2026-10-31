@@ -138,26 +138,6 @@ TEST(ScopedRootFilesystemValidation, ExistingRootIsNotOwnedOrModified) {
   EXPECT_EQ(contents(directory.path() / "keep"), "existing data");
 }
 
-TEST(ScopedRootFilesystemValidation, ContextReservesThreadUntilDestruction) {
-  using gh4ck3r::filesystem::scoped_rootfs::detail::FilesystemContext;
-  TempDir directory {"rootfs-reservation"};
-  const auto root = directory.path() / "root";
-  {
-    FilesystemContext context {root};
-    EXPECT_THROW((void)FilesystemContext {root}, std::logic_error);
-    context.restore();
-    EXPECT_THROW((void)FilesystemContext {root}, std::logic_error);
-  }
-  EXPECT_NO_THROW((void)FilesystemContext {root});
-}
-
-TEST(ScopedRootFilesystemValidation, FailedContextConstructionReleasesThreadReservation) {
-  using gh4ck3r::filesystem::scoped_rootfs::detail::FilesystemContext;
-  TempDir directory {"rootfs-reservation-failure"};
-  EXPECT_THROW((void)FilesystemContext {directory.path()}, std::invalid_argument);
-  EXPECT_NO_THROW((void)FilesystemContext {directory.path() / "root"});
-}
-
 class ScopedRootFilesystemTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -184,6 +164,22 @@ class ScopedRootFilesystemTest : public ::testing::Test {
   fs::path cwd_;
   struct stat namespace_ {};
 };
+
+TEST_F(ScopedRootFilesystemTest, ContextReservesThreadUntilDestruction) {
+  using gh4ck3r::filesystem::scoped_rootfs::detail::FilesystemContext;
+  {
+    FilesystemContext context {root()};
+    EXPECT_THROW((void)FilesystemContext {root()}, std::logic_error);
+  }
+  EXPECT_NO_THROW((void)FilesystemContext {root()});
+}
+
+TEST_F(ScopedRootFilesystemTest, FailedContextConstructionReleasesThreadReservation) {
+  using gh4ck3r::filesystem::scoped_rootfs::detail::FilesystemContext;
+  fs::create_directories(source());
+  EXPECT_THROW((void)FilesystemContext {source()}, std::invalid_argument);
+  EXPECT_NO_THROW((void)FilesystemContext {root()});
+}
 
 TEST_F(ScopedRootFilesystemTest, FreshRootRestoresRootWorkingDirectoryAndNamespace) {
   const auto outside = source() / "outside";
@@ -301,16 +297,6 @@ TEST_F(ScopedRootFilesystemTest, RollsBackAPartiallyConstructedRoot) {
       .bind(source(), "/readonly")
       .bind(source() / "missing", "/missing").create(), fs::filesystem_error);
   EXPECT_EQ(contents(source() / "file"), "original");
-}
-
-TEST_F(ScopedRootFilesystemTest, RootCreatedBeforePreparationIsNotOwnedOrRemoved) {
-  gh4ck3r::filesystem::scoped_rootfs::detail::FilesystemContext context {source()};
-  write_file(source() / "keep", "not owned");
-  EXPECT_THROW(context.prepare(), std::invalid_argument);
-  context.leave();
-  context.restore();
-  EXPECT_FALSE(context.remove_root());
-  EXPECT_EQ(contents(source() / "keep"), "not owned");
 }
 
 TEST_F(ScopedRootFilesystemTest, RejectsDestinationSymlinksWithoutFollowingThem) {

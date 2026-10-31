@@ -43,13 +43,10 @@ class ScopedRootFilesystem {
                        const std::vector<Binding> &bindings,
                        const std::vector<MockEntry> &mocks) :
     filesystem_ {root},
-    binder_ {filesystem_},
-    mocks_ {binder_}
+    binder_ {filesystem_, bindings},
+    mocks_ {binder_, mocks}
   {
     try {
-      filesystem_.prepare();
-      binder_.apply(bindings);
-      mocks_.prepare(mocks);
       filesystem_.enter();
       mocks_.start();
     } catch (...) {
@@ -60,26 +57,14 @@ class ScopedRootFilesystem {
 
   void cleanup(const char * msg) noexcept {
     try {
-      restore();
+      filesystem_.assert_owner();
+      mocks_.stop();
+      // Unmount outside chroot, but before leaving the private mount namespace.
+      filesystem_.leave();
     } catch (const std::exception &error) {
       std::fprintf(stderr, "%s: %s\n", msg, error.what());
       std::terminate();
     }
-    remove_private_root();
-  }
-
-  void restore() {
-    filesystem_.assert_owner();
-    mocks_.stop();
-    // Unmount outside chroot, but before leaving the private mount namespace.
-    filesystem_.leave();
-    binder_.unbind();
-    filesystem_.restore();
-  }
-
-  void remove_private_root() noexcept {
-    if (const auto error = filesystem_.remove_root())
-      ADD_FAILURE() << "remove scoped root " << filesystem_.root_path() << ": " << error.message();
   }
 
   void report_worker_error() noexcept {

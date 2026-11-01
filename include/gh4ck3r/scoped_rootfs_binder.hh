@@ -13,7 +13,7 @@
 #include <unistd.h>
 #include <sys/mount.h>
 #include <sys/statvfs.h>
-#include "scoped_rootfs_filesystem.hh"
+#include <gh4ck3r/file.hh>
 
 namespace gh4ck3r::filesystem::scoped_rootfs::detail {
 
@@ -21,11 +21,19 @@ class ReadonlyBinder {
  public:
   using Binding = std::pair<path_t, path_t>;
 
-  ReadonlyBinder(FilesystemContext &filesystem, const std::vector<Binding> &bindings) :
-    filesystem_ {filesystem}
+  ReadonlyBinder(path_t root, const std::vector<Binding> &bindings) :
+    root_path_ {std::move(root)}
   {
     try {
-      apply(bindings);
+      bindings_ = bindings;
+      std::sort(bindings_.begin(), bindings_.end(),
+                [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
+
+      for (const auto &[source, logical] : bindings_) {
+        const auto canonical = std::filesystem::canonical(source);
+        bind_readonly(canonical,
+                      target(logical, std::filesystem::is_directory(canonical)));
+      }
     } catch (...) {
       cleanup("rollback scoped bindings");
       throw;
@@ -39,19 +47,19 @@ class ReadonlyBinder {
   ReadonlyBinder(const ReadonlyBinder &) = delete;
   ReadonlyBinder &operator=(const ReadonlyBinder &) = delete;
 
+ protected:
   bool under_binding(const path_t &logical) const {
     return std::any_of(bindings_.begin(), bindings_.end(),
         [&](const Binding &binding) { return is_subpath(logical, binding.second); });
   }
 
   path_t path_in_root(const path_t &logical) const {
-    return filesystem_.root_path() / validate_path(logical).relative_path();
+    return root_path_ / validate_path(logical).relative_path();
   }
 
   path_t target(const path_t &logical, bool directory, bool require_existing = false) {
-    filesystem_.require_preparing();
     namespace fs = std::filesystem;
-    auto path = filesystem_.root_path();
+    auto path = root_path_;
     const auto relative = validate_path(logical).relative_path();
     for (auto part = relative.begin(); part != relative.end(); ++part) {
       path /= *part;
@@ -76,7 +84,6 @@ class ReadonlyBinder {
   }
 
   void bind_readonly(const path_t &source, const path_t &destination) {
-    filesystem_.require_preparing();
     const auto flags = readonly_flags(source);
     mounts_.push_back(destination);
     if (::mount(source.c_str(), destination.c_str(), nullptr, MS_BIND, nullptr) != 0) {
@@ -108,20 +115,7 @@ class ReadonlyBinder {
   }
 
  private:
-  void apply(const std::vector<Binding> &bindings) {
-    filesystem_.require_preparing();
-    bindings_ = bindings;
-    std::sort(bindings_.begin(), bindings_.end(),
-              [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
-    for (const auto &[source, logical] : bindings_) {
-      const auto canonical = std::filesystem::canonical(source);
-      bind_readonly(canonical, target(logical, std::filesystem::is_directory(canonical)));
-    }
-  }
-
   void unbind() {
-    if (mounts_.empty()) return;
-    filesystem_.require_mount_access();
     while (!mounts_.empty()) {
       const auto &target = mounts_.back();
       if (::umount2(target.c_str(), 0) != 0)
@@ -157,7 +151,7 @@ class ReadonlyBinder {
     return flags;
   }
 
-  FilesystemContext &filesystem_;
+  path_t root_path_;
   std::vector<Binding> bindings_;
   std::vector<path_t> mounts_;
 };

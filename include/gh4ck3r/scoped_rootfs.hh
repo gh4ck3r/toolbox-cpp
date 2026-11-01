@@ -8,59 +8,72 @@
 #include <vector>
 #include <gmock/gmock.h>
 #include "scoped_rootfs_filesystem.hh"
-#include "scoped_rootfs_binder.hh"
 #include "scoped_rootfs_mock_environment.hh"
 
 namespace gh4ck3r::filesystem::scoped_rootfs {
 
-class RootFilesystemFactory;
+class ScopedRootFsBuilder;
 
 // Thread-bound, non-copyable guard. Binds are non-recursive and read-only.
 // Commands must have completed before destruction; additional mounts must be
 // released by their owner before this guard restores the previous filesystem.
-class ScopedRootFilesystem {
+class ScopedRootFs : detail::FilesystemContext, detail::MockEnvironment {
  public:
-  ScopedRootFilesystem(const ScopedRootFilesystem &) = delete;
-  ScopedRootFilesystem &operator=(const ScopedRootFilesystem &) = delete;
-  ScopedRootFilesystem(ScopedRootFilesystem &&) = delete;
-  ScopedRootFilesystem &operator=(ScopedRootFilesystem &&) = delete;
+  ScopedRootFs(const ScopedRootFs &) = delete;
+  ScopedRootFs &operator=(const ScopedRootFs &) = delete;
+  ScopedRootFs(ScopedRootFs &&) = delete;
+  ScopedRootFs &operator=(ScopedRootFs &&) = delete;
 
-  ~ScopedRootFilesystem() noexcept {
+  ~ScopedRootFs() noexcept {
     cleanup("restore scoped root");
     report_worker_error();
   }
 
-  mock::Executable &mock(const path_t &executable) const {
-    return mocks_.mock(executable);
-  }
+  using MockEnvironment::mock;
 
  private:
-  friend class RootFilesystemFactory;
-  using Binding = detail::ReadonlyBinder::Binding;
-  using MockEntry = mock::Entry;
+  friend class ScopedRootFsBuilder;
+  using FilesystemContext::system_error;
+  using MockEnvironment::Binding;
+  using MockEntry = MockEnvironment::Entry;
 
-  ScopedRootFilesystem(const path_t &root,
-                       const std::vector<Binding> &bindings,
-                       const std::vector<MockEntry> &mocks) :
-    filesystem_ {root},
-    binder_ {filesystem_, bindings},
-    mocks_ {binder_, mocks}
+  ScopedRootFs(const path_t &root,
+               const std::vector<Binding> &bindings,
+               const std::vector<MockEntry> &mocks) :
+    FilesystemContext {root},
+    MockEnvironment {root_path(), bindings, mocks},
+    private_root_ {open_dir("/")}
   {
     try {
-      filesystem_.enter();
-      mocks_.start();
+      enter();
+      start();
     } catch (...) {
       cleanup("rollback scoped root");
       throw;
     }
   }
 
+  void enter() {
+    if (::chroot(root_path().c_str()) != 0)
+      system_error("enter scoped root");
+    if (::chdir("/") != 0)
+      system_error("enter scoped working directory");
+  }
+
+  void leave() {
+    assert_owner();
+    // pthread join can precede the kernel's final fs_struct release.
+    if (::unshare(CLONE_FS) != 0)
+      system_error("isolate filesystem state before restoration");
+    if (::fchdir(private_root_) != 0 || ::chroot(".") != 0)
+      system_error("leave scoped root");
+  }
+
   void cleanup(const char * msg) noexcept {
     try {
-      filesystem_.assert_owner();
-      mocks_.stop();
+      stop();
       // Unmount outside chroot, but before leaving the private mount namespace.
-      filesystem_.leave();
+      leave();
     } catch (const std::exception &error) {
       std::fprintf(stderr, "%s: %s\n", msg, error.what());
       std::terminate();
@@ -68,7 +81,7 @@ class ScopedRootFilesystem {
   }
 
   void report_worker_error() noexcept {
-    for (const auto &error_ptr : mocks_.take_worker_errors()) {
+    for (const auto &error_ptr : take_worker_errors()) {
       try {
         std::rethrow_exception(error_ptr);
       } catch (const std::exception &error) {
@@ -79,19 +92,17 @@ class ScopedRootFilesystem {
     }
   }
 
-  detail::FilesystemContext filesystem_;
-  detail::ReadonlyBinder binder_;
-  detail::MockEnvironment mocks_;
+  unique_fd private_root_;
 };
 
-class RootFilesystemFactory {
+class ScopedRootFsBuilder {
  public:
-  explicit RootFilesystemFactory(path_t root) : root_dir_ {std::move(root)} {
+  explicit ScopedRootFsBuilder(path_t root) : root_dir_ {std::move(root)} {
     if (root_dir_.empty() || root_dir_.native().find('\0') != std::string::npos)
       throw std::invalid_argument {"invalid scoped root path"};
   }
 
-  RootFilesystemFactory &bind(const path_t &src, path_t dst = {}) {
+  ScopedRootFsBuilder &bind(const path_t &src, path_t dst = {}) {
     if (!src.is_absolute() || src.native().find('\0') != std::string::npos)
       throw std::invalid_argument {"bind source must be absolute"};
     if (dst.empty()) dst = src;
@@ -105,27 +116,27 @@ class RootFilesystemFactory {
   }
 
   template <template <typename> class MockType = ::testing::StrictMock>
-  RootFilesystemFactory &mock(const path_t &path) {
+  ScopedRootFsBuilder &mock(const path_t &path) {
     const auto target = detail::MockEnvironment::validate_path(path);
     for (const auto &entry : mocks_)
       if (entry.target == target)
         throw std::invalid_argument {"duplicate mock target: " + target.string()};
     mocks_.push_back({target, [](path_t command, path_t original)
-        -> std::unique_ptr<mock::Executable> {
-      return std::make_unique<MockType<mock::Executable>>(
+        -> std::unique_ptr<MockExecutable> {
+      return std::make_unique<MockType<MockExecutable>>(
           std::move(command), std::move(original));
     }});
     return *this;
   }
 
-  [[nodiscard]] ScopedRootFilesystem create() const {
-    return ScopedRootFilesystem {root_dir_, binds_, mocks_};
+  [[nodiscard]] ScopedRootFs build() const {
+    return ScopedRootFs {root_dir_, binds_, mocks_};
   }
 
  private:
   path_t root_dir_;
-  std::vector<ScopedRootFilesystem::Binding> binds_;
-  std::vector<ScopedRootFilesystem::MockEntry> mocks_;
+  std::vector<ScopedRootFs::Binding> binds_;
+  std::vector<ScopedRootFs::MockEntry> mocks_;
 };
 
 } // namespace gh4ck3r::filesystem::scoped_rootfs

@@ -15,8 +15,8 @@
 namespace {
 
 namespace fs = std::filesystem;
-using gh4ck3r::filesystem::scoped_rootfs::mock::Executable;
-using gh4ck3r::filesystem::scoped_rootfs::RootFilesystemFactory;
+using gh4ck3r::filesystem::scoped_rootfs::MockExecutable;
+using gh4ck3r::filesystem::scoped_rootfs::ScopedRootFsBuilder;
 using gh4ck3r::filesystem::TempDir;
 using gh4ck3r::filesystem::unique_fd;
 using ::testing::_;
@@ -66,7 +66,7 @@ void write_fd(int fd, const std::string &text) {
   }
 }
 
-void bind_libraries(RootFilesystemFactory &factory) {
+void bind_libraries(ScopedRootFsBuilder &factory) {
   for (const auto *path : {"/lib", "/lib64", "/usr/lib", "/usr/lib64"})
     if (fs::is_directory(path)) factory.bind(path);
 }
@@ -118,7 +118,7 @@ CommandResult run_command(const std::string &program, std::vector<std::string> a
 }
 
 TEST(ScopedRootFilesystemValidation, RejectsInvalidAndDuplicatePaths) {
-  RootFilesystemFactory factory {"/unused-root"};
+  ScopedRootFsBuilder factory {"/unused-root"};
   EXPECT_THROW(factory.bind("/source", "/"), std::invalid_argument);
   EXPECT_THROW(factory.bind("/source", "/."), std::invalid_argument);
   EXPECT_THROW(factory.bind("/source", "/a/../escape"), std::invalid_argument);
@@ -134,7 +134,7 @@ TEST(ScopedRootFilesystemValidation, RejectsInvalidAndDuplicatePaths) {
 TEST(ScopedRootFilesystemValidation, ExistingRootIsNotOwnedOrModified) {
   TempDir directory {"rootfs-existing"};
   write_file(directory.path() / "keep", "existing data");
-  EXPECT_THROW((void)RootFilesystemFactory {directory.path()}.create(), std::invalid_argument);
+  EXPECT_THROW((void)ScopedRootFsBuilder {directory.path()}.build(), std::invalid_argument);
   EXPECT_EQ(contents(directory.path() / "keep"), "existing data");
 }
 
@@ -185,7 +185,7 @@ TEST_F(ScopedRootFilesystemTest, FreshRootRestoresRootWorkingDirectoryAndNamespa
   const auto outside = source() / "outside";
   write_file(outside, "outside");
   {
-    auto scope = RootFilesystemFactory {root()}.create();
+    auto scope = ScopedRootFsBuilder {root()}.build();
     EXPECT_EQ(fs::current_path(), "/");
     EXPECT_FALSE(fs::exists(outside));
     write_file("/inside/marker", "temporary");
@@ -197,7 +197,7 @@ TEST_F(ScopedRootFilesystemTest, FreshRootRestoresRootWorkingDirectoryAndNamespa
 
 TEST_F(ScopedRootFilesystemTest, RestoresDuringExceptionUnwinding) {
   EXPECT_THROW({
-    auto scope = RootFilesystemFactory {root()}.create();
+    auto scope = ScopedRootFsBuilder {root()}.build();
     write_file("/marker", "temporary");
     throw std::runtime_error {"leave root"};
   }, std::runtime_error);
@@ -207,7 +207,7 @@ TEST_F(ScopedRootFilesystemTest, OwnsARelativeRootPath) {
   const auto relative = root().lexically_relative(fs::current_path());
   ASSERT_TRUE(relative.is_relative());
   {
-    auto scope = RootFilesystemFactory {relative}.create();
+    auto scope = ScopedRootFsBuilder {relative}.build();
     write_file("/marker", "relative root");
     EXPECT_EQ(contents("/marker"), "relative root");
   }
@@ -217,7 +217,7 @@ TEST_F(ScopedRootFilesystemTest, CreatesMissingParentsButRemovesOnlyTheRequested
   const auto parent = directory_->path() / "missing-parent";
   const auto path = parent / "root";
   {
-    auto scope = RootFilesystemFactory {path}.create();
+    auto scope = ScopedRootFsBuilder {path}.build();
     write_file("/marker", "nested path");
   }
   EXPECT_FALSE(fs::exists(path));
@@ -227,9 +227,9 @@ TEST_F(ScopedRootFilesystemTest, CreatesMissingParentsButRemovesOnlyTheRequested
 TEST_F(ScopedRootFilesystemTest, BindsDirectoriesAndFilesReadOnlyAtRequestedPaths) {
   write_file(source() / "file", "original");
   {
-    auto scope = RootFilesystemFactory {root()}
+    auto scope = ScopedRootFsBuilder {root()}
       .bind(source(), "/readonly")
-      .bind(source() / "file", "/individual").create();
+      .bind(source() / "file", "/individual").build();
     EXPECT_EQ(contents("/readonly/file"), "original");
     EXPECT_EQ(contents("/individual"), "original");
     int fd = ::open("/readonly/file", O_WRONLY | O_TRUNC);
@@ -255,16 +255,16 @@ TEST_F(ScopedRootFilesystemTest, BindsDirectoriesAndFilesReadOnlyAtRequestedPath
 TEST_F(ScopedRootFilesystemTest, OmittedDestinationUsesTheSourcePath) {
   write_file(source() / "file", "same path");
   const auto path = source();
-  auto scope = RootFilesystemFactory {root()}.bind(path).create();
+  auto scope = ScopedRootFsBuilder {root()}.bind(path).build();
   EXPECT_EQ(contents(path / "file"), "same path");
 }
 
 TEST_F(ScopedRootFilesystemTest, OverlappingBindsDoNotTruncateTheOriginal) {
   write_file(source() / "file", "must survive");
   {
-    auto scope = RootFilesystemFactory {root()}
+    auto scope = ScopedRootFsBuilder {root()}
       .bind(source(), "/data")
-      .bind(source() / "file", "/data/file").create();
+      .bind(source() / "file", "/data/file").build();
     EXPECT_EQ(contents("/data/file"), "must survive");
   }
   EXPECT_EQ(contents(source() / "file"), "must survive");
@@ -274,9 +274,9 @@ TEST_F(ScopedRootFilesystemTest, ChildBindRegisteredBeforeParentIsNotShadowed) {
   write_file(source() / "dir/file", "original");
   write_file(source() / "override", "overridden");
   {
-    auto scope = RootFilesystemFactory {root()}
+    auto scope = ScopedRootFsBuilder {root()}
       .bind(source() / "override", "/data/file")
-      .bind(source() / "dir", "/data").create();
+      .bind(source() / "dir", "/data").build();
     EXPECT_EQ(contents("/data/file"), "overridden");
   }
   EXPECT_EQ(contents(source() / "dir/file"), "original");
@@ -286,16 +286,16 @@ TEST_F(ScopedRootFilesystemTest, MissingNamespaceDirectoryReportsSystemError) {
   fs::create_directories(source());
   {
     gh4ck3r::filesystem::ScopedRootDir chroot_guard {source()};
-    EXPECT_THROW((void)RootFilesystemFactory {"/scoped"}.create(), std::system_error);
+    EXPECT_THROW((void)ScopedRootFsBuilder {"/scoped"}.build(), std::system_error);
   }
-  auto scope = RootFilesystemFactory {root()}.create();
+  auto scope = ScopedRootFsBuilder {root()}.build();
 }
 
 TEST_F(ScopedRootFilesystemTest, RollsBackAPartiallyConstructedRoot) {
   write_file(source() / "file", "original");
-  EXPECT_THROW((void)RootFilesystemFactory {root()}
+  EXPECT_THROW((void)ScopedRootFsBuilder {root()}
       .bind(source(), "/readonly")
-      .bind(source() / "missing", "/missing").create(), fs::filesystem_error);
+      .bind(source() / "missing", "/missing").build(), fs::filesystem_error);
   EXPECT_EQ(contents(source() / "file"), "original");
 }
 
@@ -305,17 +305,17 @@ TEST_F(ScopedRootFilesystemTest, RejectsDestinationSymlinksWithoutFollowingThem)
   fs::create_directories(source());
   fs::create_symlink(canary, source() / "alias");
   write_file(directory_->path() / "replacement", "replacement");
-  EXPECT_THROW((void)RootFilesystemFactory {root()}
+  EXPECT_THROW((void)ScopedRootFsBuilder {root()}
       .bind(source(), "/readonly")
-      .bind(directory_->path() / "replacement", "/readonly/alias").create(),
+      .bind(directory_->path() / "replacement", "/readonly/alias").build(),
       std::invalid_argument);
   EXPECT_EQ(contents(canary), "do not truncate");
 }
 
 TEST_F(ScopedRootFilesystemTest, RejectsNestedScopeOnSameThread) {
-  auto outer = RootFilesystemFactory {root()}.create();
+  auto outer = ScopedRootFsBuilder {root()}.build();
   write_file("/outer-marker", "outer");
-  EXPECT_THROW((void)RootFilesystemFactory {"/inner"}.create(), std::logic_error);
+  EXPECT_THROW((void)ScopedRootFsBuilder {"/inner"}.build(), std::logic_error);
   EXPECT_EQ(contents("/outer-marker"), "outer");
   EXPECT_FALSE(fs::exists("/inner"));
 }
@@ -333,7 +333,7 @@ TEST_F(ScopedRootFilesystemTest, DirectoryBindsDoNotIncludeWritableSubmounts) {
   } mounted {child};
   write_file(child / "mounted", "mounted");
   {
-    auto scope = RootFilesystemFactory {root()}.bind(source(), "/visible").create();
+    auto scope = ScopedRootFsBuilder {root()}.bind(source(), "/visible").build();
     EXPECT_EQ(contents("/visible/child/underlying"), "underlying");
     EXPECT_FALSE(fs::exists("/visible/child/mounted"));
   }
@@ -349,7 +349,7 @@ TEST_F(ScopedRootFilesystemTest, WorkerThreadScopeDoesNotChangeTheCallingThreadR
   std::thread worker {[&] {
     bool signalled = false;
     try {
-      auto scope = RootFilesystemFactory {path}.create();
+      auto scope = ScopedRootFsBuilder {path}.build();
       write_file("/worker-marker", "worker");
       entered.set_value();
       signalled = true;
@@ -386,8 +386,8 @@ class ScopedExecutableMockTest : public ScopedRootFilesystemTest {
 };
 
 TEST_F(ScopedExecutableMockTest, ForwardsArgumentsStdinBinaryOutputsAndExitStatus) {
-  auto scope = RootFilesystemFactory {root()}
-    .bind(source(), "/commands").mock("/commands/agent").create();
+  auto scope = ScopedRootFsBuilder {root()}
+    .bind(source(), "/commands").mock("/commands/agent").build();
   EXPECT_CALL(scope.mock("/commands/agent"),
               execute(ElementsAre("/commands/agent", "with spaces", "", "line\nbreak"),
                       _, _, _))
@@ -409,13 +409,13 @@ TEST_F(ScopedExecutableMockTest, ForwardsArgumentsStdinBinaryOutputsAndExitStatu
 TEST_F(ScopedExecutableMockTest, CallbackOnceThenOriginalPreservesTheSource) {
   const auto original = contents(source() / "agent");
   {
-    RootFilesystemFactory factory {root()};
+    ScopedRootFsBuilder factory {root()};
     factory.bind(source(), "/commands").bind("/bin/sh").mock<::testing::NiceMock>("/commands/agent");
     bind_libraries(factory);
-    auto scope = factory.create();
+    auto scope = factory.build();
     auto &mock = scope.mock("/commands/agent");
     EXPECT_CALL(mock, execute(_, _, _, _)).Times(::testing::AnyNumber())
-      .WillRepeatedly(Invoke(&mock, &Executable::execute_original));
+      .WillRepeatedly(Invoke(&mock, &MockExecutable::execute_original));
     EXPECT_CALL(mock, execute(ElementsAre("/commands/agent", "argument"), _, _, _))
       .WillOnce(Return(19)).RetiresOnSaturation();
     EXPECT_EQ(run_command("/commands/agent", {"argument"}).code, 19);
@@ -433,20 +433,20 @@ TEST_F(ScopedExecutableMockTest, CallbackOnceThenOriginalPreservesTheSource) {
 }
 
 TEST_F(ScopedExecutableMockTest, NiceMockDefaultsToTheOriginal) {
-  RootFilesystemFactory factory {root()};
+  ScopedRootFsBuilder factory {root()};
   factory.bind(source(), "/commands").bind("/bin/sh")
     .mock<::testing::NiceMock>("/commands/agent");
   bind_libraries(factory);
-  auto scope = factory.create();
+  auto scope = factory.build();
   const auto result = run_command("/commands/agent", {"default"});
   EXPECT_EQ(result.code, 7) << result.error;
   EXPECT_EQ(result.output, "original:default\n");
 }
 
 TEST_F(ScopedExecutableMockTest, SameBasenameAndRelativeInvocationRemainUnambiguous) {
-  auto scope = RootFilesystemFactory {root()}
+  auto scope = ScopedRootFsBuilder {root()}
     .bind(source(), "/one").bind(source(), "/two")
-    .mock("/one/agent").mock("/two/agent").create();
+    .mock("/one/agent").mock("/two/agent").build();
   EXPECT_CALL(scope.mock("/one/agent"), execute(ElementsAre("/one/agent"), _, _, _))
     .WillOnce(Return(11));
   EXPECT_CALL(scope.mock("/two/agent"), execute(ElementsAre("/two/agent"), _, _, _))
@@ -458,9 +458,9 @@ TEST_F(ScopedExecutableMockTest, SameBasenameAndRelativeInvocationRemainUnambigu
 }
 
 TEST_F(ScopedExecutableMockTest, CallerArgvZeroCannotSelectADifferentMock) {
-  auto scope = RootFilesystemFactory {root()}
+  auto scope = ScopedRootFsBuilder {root()}
     .bind(source(), "/one").bind(source(), "/two")
-    .mock("/one/agent").mock("/two/agent").create();
+    .mock("/one/agent").mock("/two/agent").build();
   EXPECT_CALL(scope.mock("/one/agent"), execute(ElementsAre("/one/agent"), _, _, _))
     .WillOnce(Return(11));
   EXPECT_CALL(scope.mock("/two/agent"), execute(_, _, _, _)).Times(0);
@@ -468,11 +468,11 @@ TEST_F(ScopedExecutableMockTest, CallerArgvZeroCannotSelectADifferentMock) {
 }
 
 TEST_F(ScopedExecutableMockTest, NativeExecutionPreservesCallerArgvZero) {
-  RootFilesystemFactory factory {root()};
+  ScopedRootFsBuilder factory {root()};
   factory.bind("/bin/sh", "/commands/shell")
     .mock<::testing::NiceMock>("/commands/shell");
   bind_libraries(factory);
-  auto scope = factory.create();
+  auto scope = factory.build();
   const auto result = run_command("/commands/shell", {"-c", "printf '%s' \"$0\""},
                                    {}, "caller-shell");
   EXPECT_EQ(result.code, 0) << result.error;
@@ -480,8 +480,8 @@ TEST_F(ScopedExecutableMockTest, NativeExecutionPreservesCallerArgvZero) {
 }
 
 TEST_F(ScopedExecutableMockTest, MissingServerFailsClosedInsteadOfRunningTestMain) {
-  auto scope = RootFilesystemFactory {root()}
-    .bind(source(), "/commands").mock("/commands/agent").create();
+  auto scope = ScopedRootFsBuilder {root()}
+    .bind(source(), "/commands").mock("/commands/agent").build();
   EXPECT_CALL(scope.mock("/commands/agent"), execute(_, _, _, _)).Times(0);
   ASSERT_EQ(::unlink("/.mock_ipc/sock"), 0);
   const auto result = run_command("/commands/agent");
@@ -492,8 +492,8 @@ TEST_F(ScopedExecutableMockTest, MissingServerFailsClosedInsteadOfRunningTestMai
 
 TEST_F(ScopedExecutableMockTest, CallbackExceptionIsReportedAfterFilesystemRestoration) {
   EXPECT_NONFATAL_FAILURE({
-    auto scope = RootFilesystemFactory {root()}
-      .bind(source(), "/commands").mock("/commands/agent").create();
+    auto scope = ScopedRootFsBuilder {root()}
+      .bind(source(), "/commands").mock("/commands/agent").build();
     EXPECT_CALL(scope.mock("/commands/agent"), execute(_, _, _, _))
       .WillOnce([](const auto &, int, int, int) -> int {
         throw std::runtime_error {"injected callback exception"};
@@ -507,8 +507,8 @@ TEST_F(ScopedExecutableMockTest, CallbackExceptionIsReportedAfterFilesystemResto
 
 TEST_F(ScopedExecutableMockTest, RepeatedScopesDoNotRetainMockActions) {
   for (int i = 0; i < 2; ++i) {
-    auto scope = RootFilesystemFactory {root()}
-      .bind(source(), "/commands").mock("/commands/agent").create();
+    auto scope = ScopedRootFsBuilder {root()}
+      .bind(source(), "/commands").mock("/commands/agent").build();
     EXPECT_CALL(scope.mock("/commands/agent"), execute(_, _, _, _))
       .WillOnce(Return(20 + i));
     EXPECT_EQ(run_command("/commands/agent").code, 20 + i);
@@ -516,8 +516,8 @@ TEST_F(ScopedExecutableMockTest, RepeatedScopesDoNotRetainMockActions) {
 }
 
 TEST_F(ScopedExecutableMockTest, UnregisteredExecutableDoesNotBecomeAMock) {
-  auto scope = RootFilesystemFactory {root()}
-    .bind(source(), "/commands").mock("/commands/agent").create();
+  auto scope = ScopedRootFsBuilder {root()}
+    .bind(source(), "/commands").mock("/commands/agent").build();
   EXPECT_CALL(scope.mock("/commands/agent"), execute(_, _, _, _)).Times(0);
   const auto result = run_command("/.mock_ipc/stub",
       {"--gtest_list_tests", "--gtest_filter=ScopedRootFilesystemValidation.*"});
@@ -528,35 +528,35 @@ TEST_F(ScopedExecutableMockTest, UnregisteredExecutableDoesNotBecomeAMock) {
 
 TEST_F(ScopedExecutableMockTest, MalformedClientIsReportedWithoutLosingRestoration) {
   EXPECT_NONFATAL_FAILURE({
-    auto scope = RootFilesystemFactory {root()}
-      .bind(source(), "/commands").mock("/commands/agent").create();
+    auto scope = ScopedRootFsBuilder {root()}
+      .bind(source(), "/commands").mock("/commands/agent").build();
     EXPECT_CALL(scope.mock("/commands/agent"), execute(_, _, _, _)).Times(0);
     unique_fd client {::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)};
     sockaddr_un address {};
     address.sun_family = AF_UNIX;
     std::strncpy(address.sun_path, "/.mock_ipc/sock", sizeof(address.sun_path) - 1);
     EXPECT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
-    EXPECT_TRUE(gh4ck3r::filesystem::scoped_rootfs::mock::set_timeouts(client));
-    const auto header = (gh4ck3r::filesystem::scoped_rootfs::mock::RequestHeader {
-      gh4ck3r::filesystem::scoped_rootfs::mock::protocol_magic, 1, 1});
-    EXPECT_TRUE(gh4ck3r::filesystem::scoped_rootfs::mock::send_all(client, &header, sizeof(header)));
-    gh4ck3r::filesystem::scoped_rootfs::mock::Response response;
-    EXPECT_TRUE(gh4ck3r::filesystem::scoped_rootfs::mock::read_all(client, &response, sizeof(response)));
+    using gh4ck3r::filesystem::scoped_rootfs::detail::MockExecutableServer;
+    EXPECT_TRUE(MockExecutableServer::set_timeouts(client));
+    const auto header = (MockExecutableServer::RequestHeader {MockExecutableServer::protocol_magic, 1, 1});
+    EXPECT_TRUE(MockExecutableServer::send_all(client, &header, sizeof(header)));
+    MockExecutableServer::Response response;
+    EXPECT_TRUE(MockExecutableServer::read_all(client, &response, sizeof(response)));
     EXPECT_EQ(response.code, 125);
   }, "invalid mock IPC descriptors");
 }
 
 TEST_F(ScopedExecutableMockTest, MissingMockTargetRollsBackAllBindings) {
-  EXPECT_THROW((void)RootFilesystemFactory {root()}.bind(source(), "/commands")
-      .mock("/commands/missing").create(), std::invalid_argument);
+  EXPECT_THROW((void)ScopedRootFsBuilder {root()}.bind(source(), "/commands")
+      .mock("/commands/missing").build(), std::invalid_argument);
   EXPECT_EQ(contents(source() / "agent"),
             "#!/bin/sh\nprintf 'original:%s\\n' \"$1\"\nexit 7\n");
 }
 
 TEST_F(ScopedExecutableMockTest, MockConstructionFailureRestoresFilesystemAndAllowsAnotherScope) {
   const auto original = contents(source() / "agent");
-  EXPECT_THROW((void)RootFilesystemFactory {root()}.bind(source(), "/commands")
-      .mock<FailingMock>("/commands/agent").create(), std::runtime_error);
+  EXPECT_THROW((void)ScopedRootFsBuilder {root()}.bind(source(), "/commands")
+      .mock<FailingMock>("/commands/agent").build(), std::runtime_error);
   EXPECT_EQ(fs::current_path(), cwd_);
   EXPECT_FALSE(fs::exists(root()));
   EXPECT_EQ(contents(source() / "agent"), original);
@@ -564,13 +564,13 @@ TEST_F(ScopedExecutableMockTest, MockConstructionFailureRestoresFilesystemAndAll
   ASSERT_EQ(::stat("/proc/thread-self/ns/mnt", &current), 0);
   EXPECT_EQ(current.st_dev, namespace_.st_dev);
   EXPECT_EQ(current.st_ino, namespace_.st_ino);
-  auto scope = RootFilesystemFactory {root()}.create();
+  auto scope = ScopedRootFsBuilder {root()}.build();
   EXPECT_EQ(fs::current_path(), "/");
 }
 
 TEST_F(ScopedExecutableMockTest, CustomDirectoryBoundOverRuntimeLibraryPrefixSupportsMocks) {
-  auto scope = RootFilesystemFactory {root()}
-    .bind(source(), "/usr").mock("/usr/agent").create();
+  auto scope = ScopedRootFsBuilder {root()}
+    .bind(source(), "/usr").mock("/usr/agent").build();
   EXPECT_FALSE(fs::exists("/usr/lib"));
   EXPECT_CALL(scope.mock("/usr/agent"), execute(ElementsAre("/usr/agent", "ok"), _, _, _))
     .WillOnce(Return(37));
@@ -578,9 +578,9 @@ TEST_F(ScopedExecutableMockTest, CustomDirectoryBoundOverRuntimeLibraryPrefixSup
 }
 
 TEST_F(ScopedExecutableMockTest, NestedMockExecutionInsideCallbackDoesNotDeadlock) {
-  auto scope = RootFilesystemFactory {root()}
+  auto scope = ScopedRootFsBuilder {root()}
     .bind(source(), "/one").bind(source(), "/two")
-    .mock("/one/agent").mock("/two/agent").create();
+    .mock("/one/agent").mock("/two/agent").build();
   EXPECT_CALL(scope.mock("/two/agent"),
               execute(ElementsAre("/two/agent", "from-outer"), _, _, _))
     .WillOnce([](const auto &, int, int out, int) {
@@ -599,9 +599,9 @@ TEST_F(ScopedExecutableMockTest, NestedMockExecutionInsideCallbackDoesNotDeadloc
 }
 
 TEST_F(ScopedExecutableMockTest, ConcurrentPipelineBetweenMockedCommandsDoesNotDeadlock) {
-  auto scope = RootFilesystemFactory {root()}
+  auto scope = ScopedRootFsBuilder {root()}
     .bind(source(), "/one").bind(source(), "/two")
-    .mock("/one/agent").mock("/two/agent").create();
+    .mock("/one/agent").mock("/two/agent").build();
   std::promise<void> consumer_entered;
   auto consumer_ready = consumer_entered.get_future().share();
   EXPECT_CALL(scope.mock("/two/agent"), execute(ElementsAre("/two/agent"), _, _, _))
@@ -632,8 +632,8 @@ TEST_F(ScopedExecutableMockTest, ConcurrentPipelineBetweenMockedCommandsDoesNotD
 
 TEST_F(ScopedExecutableMockTest, ServerContinuesHandlingMocksAfterCallbackException) {
   EXPECT_NONFATAL_FAILURE({
-    auto scope = RootFilesystemFactory {root()}
-      .bind(source(), "/commands").mock("/commands/agent").create();
+    auto scope = ScopedRootFsBuilder {root()}
+      .bind(source(), "/commands").mock("/commands/agent").build();
     EXPECT_CALL(scope.mock("/commands/agent"), execute(_, _, _, _))
       .WillOnce([](const auto &, int, int, int) -> int {
         throw std::runtime_error {"first invocation failed"};
@@ -650,11 +650,11 @@ TEST_F(ScopedExecutableMockTest, ServerContinuesHandlingMocksAfterCallbackExcept
 }
 
 TEST_F(ScopedExecutableMockTest, ConcurrentOriginalAndCustomActionsDoNotRaceOnMockState) {
-  RootFilesystemFactory factory {root()};
+  ScopedRootFsBuilder factory {root()};
   factory.bind(source(), "/commands").bind("/bin/sh")
     .mock<::testing::NiceMock>("/commands/agent");
   bind_libraries(factory);
-  auto scope = factory.create();
+  auto scope = factory.build();
   auto &mock = scope.mock("/commands/agent");
 
   std::promise<void> custom_entered;

@@ -2,7 +2,6 @@
 #include <cstdio>
 #include <exception>
 #include <filesystem>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -25,8 +24,15 @@ class FilesystemContext : ThreadSingleton<FilesystemContext> {
     host_cwd_ {open_dir(".")},
     host_mnt_ns_ {open_mnt_ns()}
   {
+    if (::unshare(CLONE_NEWNS) != 0)
+      system_error("create scoped mount namespace");
     try {
-      prepare();
+      if (::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0)
+        system_error("make scoped mounts private");
+
+      if (!std::filesystem::create_directories(root_path_))
+        throw std::invalid_argument {"root_dir must be created: " + root_path_.string()};
+      std::filesystem::permissions(root_path_, std::filesystem::perms::owner_all);
     } catch (...) {
       cleanup("rollback scoped filesystem");
       throw;
@@ -40,110 +46,54 @@ class FilesystemContext : ThreadSingleton<FilesystemContext> {
   FilesystemContext(const FilesystemContext &) = delete;
   FilesystemContext &operator=(const FilesystemContext &) = delete;
 
+ protected:
   const path_t &root_path() const noexcept { return root_path_; }
-
-  void enter() {
-    require_preparing();
-    if (::chroot(root_path_.c_str()) != 0)
-      system_error("enter scoped root");
-    root_entered_ = true;
-    preparing_ = false;
-    if (::chdir("/") != 0) system_error("enter scoped working directory");
-  }
-
-  void leave() {
-    assert_owner();
-    if (!namespace_active_) return;
-    // pthread join can precede the kernel's final fs_struct release.
-    if (::unshare(CLONE_FS) != 0)
-      system_error("isolate filesystem state before restoration");
-    if (root_entered_) {
-      if (::fchdir(*private_root_) != 0 || ::chroot(".") != 0)
-        system_error("leave scoped root");
-      root_entered_ = false;
-    }
-    preparing_ = false;
-  }
 
   void assert_owner() const {
     if (owner() != std::this_thread::get_id())
-      throw std::runtime_error {"scoped root destroyed on a different thread"};
-  }
-
-  void require_preparing() const {
-    assert_owner();
-    if (!preparing_)
-      throw std::logic_error {"scoped root is not being prepared"};
-  }
-
-  void require_mount_access() const {
-    assert_owner();
-    if (!namespace_active_ || root_entered_)
-      throw std::logic_error {"scoped mounts require the private namespace outside chroot"};
-  }
-
- private:
-  void prepare() {
-    assert_owner();
-    if (namespace_active_)
-      throw std::logic_error {"scoped mount namespace already prepared"};
-    if (::unshare(CLONE_NEWNS) != 0)
-      system_error("create scoped mount namespace");
-
-    namespace_active_ = true;
-    private_root_.emplace(open_dir("/"));
-    if (::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0)
-      system_error("make scoped mounts private");
-
-    if (!std::filesystem::create_directories(root_path_))
-      throw std::invalid_argument {"root_dir must be created: " + root_path_.string()};
-    root_owned_ = true;
-    std::filesystem::permissions(root_path_, std::filesystem::perms::owner_all);
-    preparing_ = true;
-  }
-
-  void restore() {
-    assert_owner();
-    if (!namespace_active_) return;
-    require_mount_access();
-    if (::setns(host_mnt_ns_, CLONE_NEWNS) != 0)
-      system_error("restore mount namespace");
-    if (::fchdir(host_root_) != 0 || ::chroot(".") != 0 || ::fchdir(host_cwd_) != 0)
-      system_error("restore root and working directory");
-    private_root_.reset();
-    namespace_active_ = false;
-    preparing_ = false;
-  }
-
-  void remove_private_root() noexcept {
-    if (!root_owned_) return;
-    std::error_code error;
-    std::filesystem::remove_all(root_path_, error);
-    if (!error)
-      root_owned_ = false;
-    else
-      ADD_FAILURE() << "remove scoped root " << root_path_ << ": " << error.message();
-  }
-
-  void cleanup(const char *msg) noexcept {
-    try {
-      restore();
-    } catch (const std::exception &error) {
-      std::fprintf(stderr, "%s: %s\n", msg, error.what());
-      std::terminate();
-    }
-    remove_private_root();
-  }
-  static path_t validate_root(const path_t &root) {
-    auto dir = std::filesystem::absolute(root).lexically_normal();
-    if (std::filesystem::exists(std::filesystem::symlink_status(dir)))
-      throw std::invalid_argument {"root_dir must not exist prior to creation: " + dir.string()};
-    return dir;
+      throw std::runtime_error {"scoped root accessed on a different thread"};
   }
 
   [[noreturn]]
   static void system_error(const std::string &operation, int error = errno) {
     throw std::system_error {error, std::system_category(), operation};
+  }
+
+  static unique_fd open_dir(const path_t &dir) {
+    const auto fd = ::open(dir.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (fd == -1) system_error("open directory " + dir.string());
+    return promote_fd(fd);
+  }
+
+ private:
+  void remove_private_root() noexcept {
+    std::error_code error;
+    std::filesystem::remove_all(root_path_, error);
+    if (error)
+      ADD_FAILURE() << "remove scoped root " << root_path_ << ": " << error.message();
+  }
+
+  void cleanup(const char *msg) noexcept {
+    if (owner() != std::this_thread::get_id()) {
+      std::fprintf(stderr, "%s: scoped root destroyed on a different thread\n", msg);
+      std::terminate();
+    }
+    if (::setns(host_mnt_ns_, CLONE_NEWNS) != 0) {
+      std::fprintf(stderr, "%s: restore mount namespace: %s\n", msg, std::strerror(errno));
+      std::terminate();
+    }
+    if (::fchdir(host_root_) != 0 || ::chroot(".") != 0 || ::fchdir(host_cwd_) != 0) {
+      std::fprintf(stderr, "%s: restore root and working directory: %s\n", msg, std::strerror(errno));
+      std::terminate();
+    }
+    remove_private_root();
+  }
+
+  static path_t validate_root(const path_t &root) {
+    auto dir = std::filesystem::absolute(root).lexically_normal();
+    if (std::filesystem::exists(std::filesystem::symlink_status(dir)))
+      throw std::invalid_argument {"root_dir must not exist prior to creation: " + dir.string()};
+    return dir;
   }
 
   static unique_fd promote_fd(int fd) {
@@ -152,12 +102,6 @@ class FilesystemContext : ThreadSingleton<FilesystemContext> {
       return {high_fd};
     }
     return {fd};
-  }
-
-  static unique_fd open_dir(const path_t &dir) {
-    const auto fd = ::open(dir.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
-    if (fd == -1) system_error("open directory " + dir.string());
-    return promote_fd(fd);
   }
 
   static unique_fd open_mnt_ns() {
@@ -170,11 +114,6 @@ class FilesystemContext : ThreadSingleton<FilesystemContext> {
   unique_fd host_root_;
   unique_fd host_cwd_;
   unique_fd host_mnt_ns_;
-  std::optional<unique_fd> private_root_;
-  bool namespace_active_ = false;
-  bool root_owned_ = false;
-  bool root_entered_ = false;
-  bool preparing_ = false;
 };
 
 } // namespace gh4ck3r::filesystem::scoped_rootfs::detail

@@ -1,5 +1,4 @@
 #pragma once
-#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -13,71 +12,66 @@
 
 namespace gh4ck3r::filesystem::scoped_rootfs::detail {
 
-class MockEnvironment {
+class MockEnvironment : ReadonlyBinder, protected MockExecutableServer {
  public:
-  MockEnvironment(ReadonlyBinder &binder, const std::vector<mock::Entry> &entries) :
-    binder_ {binder}
+  using ReadonlyBinder::Binding;
+  using MockExecutableServer::Entry;
+
+  MockEnvironment(path_t root, const std::vector<Binding> &bindings,
+                  const std::vector<Entry> &entries) :
+    ReadonlyBinder {std::move(root), bindings}
   {
-    prepare(entries);
+    if (entries.empty()) return;
+    namespace fs = std::filesystem;
+    const auto executable = fs::read_symlink("/proc/self/exe");
+    bind_readonly(executable, target(stub_path, false));
+    for (const auto &[path, source] : runtime_files(executable)) {
+      auto logical = path;
+      auto destination = path_in_root(logical);
+      if (fs::exists(fs::symlink_status(destination))) continue;
+      if (under_binding(logical)) {
+        logical = fallback_runtime_path(path);
+        destination = path_in_root(logical);
+        if (fs::exists(fs::symlink_status(destination)) || under_binding(logical))
+          continue;
+      }
+      bind_readonly(source, target(logical, false));
+    }
+
+    for (const auto &entry : entries) {
+      const auto destination = target(entry.target, false, true);
+      if (!fs::is_regular_file(fs::symlink_status(destination)))
+        throw std::invalid_argument {"mock requires a regular file: " + entry.target.string()};
+      const auto original = path_t {originals_dir} / entry.target.relative_path();
+      bind_readonly(destination, target(original, false));
+      bind_readonly(path_in_root(stub_path), destination);
+      emplace(entry.target, entry.builder(entry.target, original));
+    }
   }
+  ~MockEnvironment() = default;
 
-  void start() { server_.start(); }
-  void stop() { server_.stop(); }
-
-  mock::Executable &mock(const path_t &executable) const {
-    return server_.mock(validate_path(executable));
-  }
-
-  std::vector<std::exception_ptr> take_worker_errors() {
-    return server_.take_worker_errors();
+  MockExecutable &mock(const path_t &executable) const {
+    return MockExecutableServer::mock(validate_path(executable));
   }
 
   static path_t validate_path(const path_t &path) {
     const auto result = ReadonlyBinder::validate_path(path);
-    for (const auto &p : {mock::ipc_dir, mock::originals_dir}) {
-      if (ReadonlyBinder::is_subpath(result, p))
+    for (const auto &p : {ipc_dir, originals_dir}) {
+      if (is_subpath(result, p))
         throw std::invalid_argument {"reserved scoped root path: " + path.native()};
     }
     return result;
   }
 
  private:
-  void prepare(const std::vector<mock::Entry> &entries) {
-    if (entries.empty()) return;
-    namespace fs = std::filesystem;
-    const auto executable = fs::read_symlink("/proc/self/exe");
-    binder_.bind_readonly(executable, binder_.target(mock::stub_path, false));
-    for (const auto &[path, source] : runtime_files(executable)) {
-      auto logical = path;
-      auto destination = binder_.path_in_root(logical);
-      if (fs::exists(fs::symlink_status(destination))) continue;
-      if (binder_.under_binding(logical)) {
-        logical = fallback_runtime_path(path);
-        destination = binder_.path_in_root(logical);
-        if (fs::exists(fs::symlink_status(destination)) || binder_.under_binding(logical))
-          continue;
-      }
-      binder_.bind_readonly(source, binder_.target(logical, false));
-    }
-
-    for (const auto &entry : entries) {
-      const auto destination = binder_.target(entry.target, false, true);
-      if (!fs::is_regular_file(fs::symlink_status(destination)))
-        throw std::invalid_argument {"mock requires a regular file: " + entry.target.string()};
-      const auto original = path_t {mock::originals_dir} / entry.target.relative_path();
-      binder_.bind_readonly(destination, binder_.target(original, false));
-      binder_.bind_readonly(binder_.path_in_root(mock::stub_path), destination);
-      server_.emplace(entry.target, entry.builder(entry.target, original));
-    }
-  }
   static path_t fallback_runtime_path(const path_t &path) {
-    if (ReadonlyBinder::is_subpath(path, "/usr/lib"))
+    if (is_subpath(path, "/usr/lib"))
       return path_t {"/lib"} / path.lexically_relative("/usr/lib");
-    if (ReadonlyBinder::is_subpath(path, "/lib"))
+    if (is_subpath(path, "/lib"))
       return path_t {"/usr/lib"} / path.lexically_relative("/lib");
-    if (ReadonlyBinder::is_subpath(path, "/usr/lib64"))
+    if (is_subpath(path, "/usr/lib64"))
       return path_t {"/lib64"} / path.lexically_relative("/usr/lib64");
-    if (ReadonlyBinder::is_subpath(path, "/lib64"))
+    if (is_subpath(path, "/lib64"))
       return path_t {"/usr/lib64"} / path.lexically_relative("/lib64");
     return path_t {"/lib"} / path.filename();
   }
@@ -115,9 +109,6 @@ class MockEnvironment {
     if (!info.interpreter.empty()) add(info.interpreter, info.interpreter);
     return result;
   }
-
-  ReadonlyBinder &binder_;
-  mock::IpcServer server_;
 };
 
 } // namespace gh4ck3r::filesystem::scoped_rootfs::detail

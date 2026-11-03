@@ -103,6 +103,14 @@ inline size_t dir_siz(const path_t dir) {
   return std::distance(directory_iterator{dir}, directory_iterator{});
 }
 
+inline bool is_subpath(const path_t &path, const path_t &base) {
+  const auto norm_path = path.lexically_normal();
+  auto norm_base = base.lexically_normal();
+  if (!norm_base.has_filename()) norm_base = norm_base.parent_path();
+  const auto rel = norm_path.lexically_relative(norm_base);
+  return !rel.empty() && *rel.begin() != "..";
+}
+
 template <int mode>
 inline bool access(const path_t &p) {
   return ::access(p.c_str(), mode) == 0;

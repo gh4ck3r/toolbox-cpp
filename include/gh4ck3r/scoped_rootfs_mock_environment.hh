@@ -24,38 +24,41 @@ class MockEnvironment : ReadonlyBinder, protected MockExecutableServer {
     if (entries.empty()) return;
     namespace fs = std::filesystem;
     const auto executable = fs::read_symlink("/proc/self/exe");
-    bind_readonly(executable, target(stub_path, false));
+    bind(executable, ensure_mountpoint(stub_path, false));
     for (const auto &[path, source] : runtime_files(executable)) {
-      auto logical = path;
-      auto destination = path_in_root(logical);
+      auto guest_path = path;
+      auto destination = host_path(guest_path);
       if (fs::exists(fs::symlink_status(destination))) continue;
-      if (under_binding(logical)) {
-        logical = fallback_runtime_path(path);
-        destination = path_in_root(logical);
-        if (fs::exists(fs::symlink_status(destination)) || under_binding(logical))
+      if (is_bound(guest_path)) {
+        guest_path = fallback_runtime_path(path);
+        destination = host_path(guest_path);
+        if (fs::exists(fs::symlink_status(destination)) || is_bound(guest_path))
           continue;
       }
-      bind_readonly(source, target(logical, false));
+      bind(source, ensure_mountpoint(guest_path, false));
     }
 
     for (const auto &entry : entries) {
-      const auto destination = target(entry.target, false, true);
-      if (!fs::is_regular_file(fs::symlink_status(destination)))
+      const auto destination = host_path(entry.target);
+      const auto status = fs::symlink_status(destination);
+      if (!fs::exists(status))
+        throw std::invalid_argument {"mock target does not exist: " + destination.string()};
+      if (!fs::is_regular_file(status))
         throw std::invalid_argument {"mock requires a regular file: " + entry.target.string()};
       const auto original = path_t {originals_dir} / entry.target.relative_path();
-      bind_readonly(destination, target(original, false));
-      bind_readonly(path_in_root(stub_path), destination);
+      bind(destination, ensure_mountpoint(original, false));
+      bind(host_path(stub_path), destination);
       emplace(entry.target, entry.builder(entry.target, original));
     }
   }
   ~MockEnvironment() = default;
 
   MockExecutable &mock(const path_t &executable) const {
-    return MockExecutableServer::mock(validate_path(executable));
+    return MockExecutableServer::mock(validate(executable));
   }
 
-  static path_t validate_path(const path_t &path) {
-    const auto result = ReadonlyBinder::validate_path(path);
+  static path_t validate(const path_t &path) {
+    const auto result = ReadonlyBinder::validate(path);
     for (const auto &p : {ipc_dir, originals_dir}) {
       if (is_subpath(result, p))
         throw std::invalid_argument {"reserved scoped root path: " + path.native()};

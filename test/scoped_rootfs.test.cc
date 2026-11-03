@@ -307,7 +307,8 @@ TEST_F(ScopedRootFilesystemTest, RejectsDestinationSymlinksWithoutFollowingThem)
   write_file(directory_->path() / "replacement", "replacement");
   EXPECT_THROW((void)ScopedRootFsBuilder {root()}
       .bind(source(), "/readonly")
-      .bind(directory_->path() / "replacement", "/readonly/alias").build(),
+      .bind(directory_->path() / "replacement", "/readonly/alias")
+      .build(),
       std::invalid_argument);
   EXPECT_EQ(contents(canary), "do not truncate");
 }

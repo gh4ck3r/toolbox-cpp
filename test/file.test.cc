@@ -141,6 +141,32 @@ TEST(dir_siz, default)
   EXPECT_EQ(before, dir_siz(tempdir));
 }
 
+TEST(is_subpath, basic)
+{
+  EXPECT_TRUE(is_subpath("/usr/lib", "/usr"));
+  EXPECT_TRUE(is_subpath("/usr/lib/libc.so", "/usr/lib"));
+  EXPECT_TRUE(is_subpath("/usr/lib", "/usr/lib"));
+  EXPECT_TRUE(is_subpath("/usr", "/"));
+  EXPECT_TRUE(is_subpath("/", "/"));
+
+  EXPECT_FALSE(is_subpath("/usr", "/usr/lib"));
+  EXPECT_FALSE(is_subpath("/usr/lib64", "/usr/lib"));
+  EXPECT_FALSE(is_subpath("/var/lib", "/usr/lib"));
+  EXPECT_FALSE(is_subpath("usr/lib", "/usr"));
+  EXPECT_FALSE(is_subpath("/usr/lib", "usr"));
+}
+
+TEST(is_subpath, normalization_and_trailing_slash)
+{
+  EXPECT_TRUE(is_subpath("/usr/lib/", "/usr/lib"));
+  EXPECT_TRUE(is_subpath("/usr/lib", "/usr/lib/"));
+  EXPECT_TRUE(is_subpath("/usr/lib/libc.so", "/usr/lib/"));
+  EXPECT_TRUE(is_subpath("/usr/local/../lib/libc.so", "/usr/lib"));
+
+  EXPECT_FALSE(is_subpath("/usr/lib/../..", "/usr"));
+  EXPECT_FALSE(is_subpath("/usr/lib/../bin", "/usr/lib"));
+}
+
 TEST(is_readable, default)
 {
   EXPECT_TRUE(is_readable(read_symlink(path{"/proc/self/exe"})));

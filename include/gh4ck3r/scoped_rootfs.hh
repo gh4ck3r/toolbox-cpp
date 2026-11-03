@@ -45,7 +45,10 @@ class ScopedRootFs : detail::FilesystemContext, detail::MockEnvironment {
     private_root_ {open_dir("/")}
   {
     try {
-      enter();
+      if (::chroot(root_path().c_str()) != 0)
+        system_error("enter scoped root");
+      if (::chdir("/") != 0)
+        system_error("enter scoped working directory");
       start();
     } catch (...) {
       cleanup("rollback scoped root");
@@ -53,27 +56,16 @@ class ScopedRootFs : detail::FilesystemContext, detail::MockEnvironment {
     }
   }
 
-  void enter() {
-    if (::chroot(root_path().c_str()) != 0)
-      system_error("enter scoped root");
-    if (::chdir("/") != 0)
-      system_error("enter scoped working directory");
-  }
-
-  void leave() {
-    assert_owner();
-    // pthread join can precede the kernel's final fs_struct release.
-    if (::unshare(CLONE_FS) != 0)
-      system_error("isolate filesystem state before restoration");
-    if (::fchdir(private_root_) != 0 || ::chroot(".") != 0)
-      system_error("leave scoped root");
-  }
-
   void cleanup(const char * msg) noexcept {
     try {
       stop();
       // Unmount outside chroot, but before leaving the private mount namespace.
-      leave();
+      assert_owner();
+      // pthread join can precede the kernel's final fs_struct release.
+      if (::unshare(CLONE_FS) != 0)
+        system_error("isolate filesystem state before restoration");
+      if (::fchdir(private_root_) != 0 || ::chroot(".") != 0)
+        system_error("leave scoped root");
     } catch (const std::exception &error) {
       std::fprintf(stderr, "%s: %s\n", msg, error.what());
       std::terminate();
@@ -106,7 +98,7 @@ class ScopedRootFsBuilder {
     if (!src.is_absolute() || src.native().find('\0') != std::string::npos)
       throw std::invalid_argument {"bind source must be absolute"};
     if (dst.empty()) dst = src;
-    dst = detail::MockEnvironment::validate_path(dst);
+    dst = detail::MockEnvironment::validate(dst);
 
     for (const auto &binding : binds_)
       if (binding.second == dst)
@@ -117,7 +109,7 @@ class ScopedRootFsBuilder {
 
   template <template <typename> class MockType = ::testing::StrictMock>
   ScopedRootFsBuilder &mock(const path_t &path) {
-    const auto target = detail::MockEnvironment::validate_path(path);
+    const auto target = detail::MockEnvironment::validate(path);
     for (const auto &entry : mocks_)
       if (entry.target == target)
         throw std::invalid_argument {"duplicate mock target: " + target.string()};

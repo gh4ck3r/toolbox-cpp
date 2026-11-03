@@ -19,7 +19,7 @@ namespace gh4ck3r::filesystem::scoped_rootfs::detail {
 class FilesystemContext : ThreadSingleton<FilesystemContext> {
  public:
   explicit FilesystemContext(const path_t &root) :
-    root_path_ {validate_root(root)},
+    root_path_ {validate(root)},
     host_root_ {open_dir("/")},
     host_cwd_ {open_dir(".")},
     host_mnt_ns_ {open_mnt_ns()}
@@ -89,7 +89,7 @@ class FilesystemContext : ThreadSingleton<FilesystemContext> {
     remove_private_root();
   }
 
-  static path_t validate_root(const path_t &root) {
+  static path_t validate(const path_t &root) {
     auto dir = std::filesystem::absolute(root).lexically_normal();
     if (std::filesystem::exists(std::filesystem::symlink_status(dir)))
       throw std::invalid_argument {"root_dir must not exist prior to creation: " + dir.string()};

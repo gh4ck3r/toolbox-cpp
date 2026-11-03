@@ -1,38 +1,55 @@
 #pragma once
 #include <algorithm>
 #include <cstdio>
-#include <exception>
+#include <cstring>
 #include <filesystem>
-#include <iterator>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
-#include <fcntl.h>
-#include <unistd.h>
 #include <sys/mount.h>
 #include <sys/statvfs.h>
 #include <gh4ck3r/file.hh>
 
 namespace gh4ck3r::filesystem::scoped_rootfs::detail {
 
+struct system_error : std::system_error {
+  explicit system_error(const std::string &operation, int error = errno) :
+    std::system_error {error, std::system_category(), operation}
+  {}
+};
+
+inline unsigned long readonly_mountflags(const path_t &source) {
+  struct statvfs status {};
+  if (::statvfs(source.c_str(), &status) != 0)
+    throw system_error {"inspect bind source " + source.string()};
+  unsigned long flags = MS_BIND | MS_REMOUNT | MS_RDONLY;
+  if (status.f_flag & ST_NOSUID) flags |= MS_NOSUID;
+  if (status.f_flag & ST_NODEV) flags |= MS_NODEV;
+  if (status.f_flag & ST_NOEXEC) flags |= MS_NOEXEC;
+  if (status.f_flag & ST_NOATIME) flags |= MS_NOATIME;
+  if (status.f_flag & ST_NODIRATIME) flags |= MS_NODIRATIME;
+  if (status.f_flag & ST_RELATIME) flags |= MS_RELATIME;
+  return flags;
+}
+
 class ReadonlyBinder {
  public:
   using Binding = std::pair<path_t, path_t>;
 
   ReadonlyBinder(path_t root, const std::vector<Binding> &bindings) :
-    root_path_ {std::move(root)}
+    root_path_ {std::move(root)},
+    bindings_ {bindings}
   {
+    std::sort(bindings_.begin(), bindings_.end(),
+              [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
     try {
-      bindings_ = bindings;
-      std::sort(bindings_.begin(), bindings_.end(),
-                [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
-
-      for (const auto &[source, logical] : bindings_) {
-        const auto canonical = std::filesystem::canonical(source);
-        bind_readonly(canonical,
-                      target(logical, std::filesystem::is_directory(canonical)));
+      namespace fs = std::filesystem;
+      for (const auto &[src, dst] : bindings_) {
+        const auto canonical = fs::canonical(src);
+        bind(canonical, ensure_mountpoint(dst, fs::is_directory(canonical)));
       }
     } catch (...) {
       cleanup("rollback scoped bindings");
@@ -48,66 +65,50 @@ class ReadonlyBinder {
   ReadonlyBinder &operator=(const ReadonlyBinder &) = delete;
 
  protected:
-  bool under_binding(const path_t &logical) const {
+  bool is_bound(const path_t &guest_path) const {
     return std::any_of(bindings_.begin(), bindings_.end(),
-        [&](const Binding &binding) { return is_subpath(logical, binding.second); });
+        [&](const Binding &binding) { return is_subpath(guest_path, binding.second); });
   }
 
-  path_t path_in_root(const path_t &logical) const {
-    return root_path_ / validate_path(logical).relative_path();
+  path_t host_path(const path_t &guest_path) const {
+    return root_path_ / validate(guest_path).relative_path();
   }
 
-  path_t target(const path_t &logical, bool directory, bool require_existing = false) {
+  path_t ensure_mountpoint(const path_t &guest_path, bool directory) {
     namespace fs = std::filesystem;
     auto path = root_path_;
-    const auto relative = validate_path(logical).relative_path();
-    for (auto part = relative.begin(); part != relative.end(); ++part) {
-      path /= *part;
-      const auto status = fs::symlink_status(path);
-      if (fs::is_symlink(status))
+    for (const auto &part : validate(guest_path).relative_path()) {
+      path /= part;
+      if (fs::is_symlink(fs::symlink_status(path)))
         throw std::invalid_argument {"symlink in bind destination: " + path.string()};
-      const bool want_directory = std::next(part) != relative.end() || directory;
-      if (fs::exists(status)) {
-        if (want_directory != fs::is_directory(status))
-          throw std::invalid_argument {"incompatible bind destination: " + path.string()};
-      } else if (require_existing) {
-        throw std::invalid_argument {"mock target does not exist: " + path.string()};
-      } else if (want_directory) {
-        fs::create_directory(path);
-      } else {
-        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (fd < 0) system_error("create bind destination " + path.string());
-        ::close(fd);
-      }
+    }
+    if (directory) {
+      fs::create_directories(path);
+    } else if (!fs::exists(path)) {
+      fs::create_directories(path.parent_path());
+      std::ofstream {path}.exceptions(std::ios::failbit | std::ios::badbit);
     }
     return path;
   }
 
-  void bind_readonly(const path_t &source, const path_t &destination) {
-    const auto flags = readonly_flags(source);
+  void bind(const path_t &source, const path_t &destination) {
+    const auto flags = readonly_mountflags(source);
+    if (::mount(source.c_str(), destination.c_str(), nullptr, MS_BIND, nullptr) != 0)
+      throw system_error {"bind " + source.string()};
     mounts_.push_back(destination);
-    if (::mount(source.c_str(), destination.c_str(), nullptr, MS_BIND, nullptr) != 0) {
-      mounts_.pop_back();
-      system_error("bind " + source.string());
-    }
     if (::mount(nullptr, destination.c_str(), nullptr, flags, nullptr) != 0)
-      system_error("make bind read-only " + destination.string());
+      throw system_error {"make bind read-only " + destination.string()};
   }
 
-  static bool is_subpath(const path_t &path, const path_t &base) {
-    const auto rel = path.lexically_relative(base);
-    return !rel.empty() && *rel.begin() != "..";
-  }
-
-  static path_t validate_path(const path_t &path) {
-    const auto invalid_argument = [&path](const std::string &msg) {
-      throw std::invalid_argument {msg + ": " + path.native()};
+  static path_t validate(const path_t &logical) {
+    const auto invalid_argument = [&logical](const std::string &msg) {
+      throw std::invalid_argument {msg + ": " + logical.native()};
     };
-    if (path.native().find('\0') != std::string::npos)
+    if (logical.native().find('\0') != std::string::npos)
       invalid_argument("malformed path");
-    if (std::find(path.begin(), path.end(), "..") != path.end())
+    if (std::find(logical.begin(), logical.end(), "..") != logical.end())
       invalid_argument("parent traversal in path");
-    auto result = path.lexically_normal();
+    auto result = logical.lexically_normal();
     if (result.filename().empty()) result = result.parent_path();
     if (!result.is_absolute() || result == "/")
       invalid_argument("expected an absolute non-root path");
@@ -115,40 +116,16 @@ class ReadonlyBinder {
   }
 
  private:
-  void unbind() {
+  void cleanup(const char *msg) noexcept {
     while (!mounts_.empty()) {
       const auto &target = mounts_.back();
-      if (::umount2(target.c_str(), 0) != 0)
-        system_error("unmount scoped bind " + target.string());
+      if (::umount2(target.c_str(), 0) != 0) {
+        std::fprintf(stderr, "%s: unmount scoped bind %s: %s\n",
+                     msg, target.c_str(), std::strerror(errno));
+        std::terminate();
+      }
       mounts_.pop_back();
     }
-  }
-
-  void cleanup(const char *msg) noexcept {
-    try {
-      unbind();
-    } catch (const std::exception &error) {
-      std::fprintf(stderr, "%s: %s\n", msg, error.what());
-      std::terminate();
-    }
-  }
-  [[noreturn]]
-  static void system_error(const std::string &operation, int error = errno) {
-    throw std::system_error {error, std::system_category(), operation};
-  }
-
-  static unsigned long readonly_flags(const path_t &source) {
-    struct statvfs status {};
-    if (::statvfs(source.c_str(), &status) != 0)
-      system_error("inspect bind source " + source.string());
-    unsigned long flags = MS_BIND | MS_REMOUNT | MS_RDONLY;
-    if (status.f_flag & ST_NOSUID) flags |= MS_NOSUID;
-    if (status.f_flag & ST_NODEV) flags |= MS_NODEV;
-    if (status.f_flag & ST_NOEXEC) flags |= MS_NOEXEC;
-    if (status.f_flag & ST_NOATIME) flags |= MS_NOATIME;
-    if (status.f_flag & ST_NODIRATIME) flags |= MS_NODIRATIME;
-    if (status.f_flag & ST_RELATIME) flags |= MS_RELATIME;
-    return flags;
   }
 
   path_t root_path_;

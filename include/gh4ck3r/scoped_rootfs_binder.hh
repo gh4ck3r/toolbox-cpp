@@ -39,18 +39,14 @@ class ReadonlyBinder {
  public:
   using Binding = std::pair<path_t, path_t>;
 
-  ReadonlyBinder(path_t root, const std::vector<Binding> &bindings) :
-    root_path_ {std::move(root)},
-    bindings_ {bindings}
+  ReadonlyBinder(path_t root, std::vector<Binding> bindings) :
+    root_path_ {std::move(root)}
   {
-    std::sort(bindings_.begin(), bindings_.end(),
+    std::sort(bindings.begin(), bindings.end(),
               [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
     try {
-      namespace fs = std::filesystem;
-      for (const auto &[src, dst] : bindings_) {
-        const auto canonical = fs::canonical(src);
-        bind(canonical, ensure_mountpoint(dst, fs::is_directory(canonical)));
-      }
+      for (const auto &[src, dst] : bindings)
+        bind(canonical(src), dst);
     } catch (...) {
       cleanup("rollback scoped bindings");
       throw;
@@ -66,35 +62,20 @@ class ReadonlyBinder {
 
  protected:
   bool is_bound(const path_t &guest_path) const {
-    return std::any_of(bindings_.begin(), bindings_.end(),
-        [&](const Binding &binding) { return is_subpath(guest_path, binding.second); });
+    const auto target = host_path(guest_path);
+    return std::any_of(mounts_.begin(), mounts_.end(),
+        [&](const path_t &mount) { return is_subpath(target, mount); });
   }
 
   path_t host_path(const path_t &guest_path) const {
     return root_path_ / validate(guest_path).relative_path();
   }
 
-  path_t ensure_mountpoint(const path_t &guest_path, bool directory) {
-    namespace fs = std::filesystem;
-    auto path = root_path_;
-    for (const auto &part : validate(guest_path).relative_path()) {
-      path /= part;
-      if (fs::is_symlink(fs::symlink_status(path)))
-        throw std::invalid_argument {"symlink in bind destination: " + path.string()};
-    }
-    if (directory) {
-      fs::create_directories(path);
-    } else if (!fs::exists(path)) {
-      fs::create_directories(path.parent_path());
-      std::ofstream {path}.exceptions(std::ios::failbit | std::ios::badbit);
-    }
-    return path;
-  }
-
-  void bind(const path_t &source, const path_t &destination) {
-    const auto flags = readonly_mountflags(source);
-    if (::mount(source.c_str(), destination.c_str(), nullptr, MS_BIND, nullptr) != 0)
-      throw system_error {"bind " + source.string()};
+  void bind(const path_t &host_src, const path_t &guest_dst) {
+    const auto flags = readonly_mountflags(host_src);
+    const auto destination = ensure_mountpoint(guest_dst, is_directory(host_src));
+    if (::mount(host_src.c_str(), destination.c_str(), nullptr, MS_BIND, nullptr) != 0)
+      throw system_error {"bind " + host_src.string()};
     mounts_.push_back(destination);
     if (::mount(nullptr, destination.c_str(), nullptr, flags, nullptr) != 0)
       throw system_error {"make bind read-only " + destination.string()};
@@ -116,6 +97,22 @@ class ReadonlyBinder {
   }
 
  private:
+  path_t ensure_mountpoint(const path_t &guest_path, bool directory) {
+    auto path = root_path_;
+    for (const auto &part : validate(guest_path).relative_path()) {
+      path /= part;
+      if (is_symlink(symlink_status(path)))
+        throw std::invalid_argument {"symlink in bind destination: " + path.string()};
+    }
+    if (directory) {
+      create_directories(path);
+    } else if (!exists(path)) {
+      create_directories(path.parent_path());
+      std::ofstream {path}.exceptions(std::ios::failbit | std::ios::badbit);
+    }
+    return path;
+  }
+
   void cleanup(const char *msg) noexcept {
     while (!mounts_.empty()) {
       const auto &target = mounts_.back();
@@ -129,7 +126,6 @@ class ReadonlyBinder {
   }
 
   path_t root_path_;
-  std::vector<Binding> bindings_;
   std::vector<path_t> mounts_;
 };
 

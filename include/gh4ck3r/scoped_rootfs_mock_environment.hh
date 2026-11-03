@@ -24,7 +24,7 @@ class MockEnvironment : ReadonlyBinder, protected MockExecutableServer {
     if (entries.empty()) return;
     namespace fs = std::filesystem;
     const auto executable = fs::read_symlink("/proc/self/exe");
-    bind(executable, ensure_mountpoint(stub_path, false));
+    bind(executable, stub_path);
     for (const auto &[path, source] : runtime_files(executable)) {
       auto guest_path = path;
       auto destination = host_path(guest_path);
@@ -35,7 +35,7 @@ class MockEnvironment : ReadonlyBinder, protected MockExecutableServer {
         if (fs::exists(fs::symlink_status(destination)) || is_bound(guest_path))
           continue;
       }
-      bind(source, ensure_mountpoint(guest_path, false));
+      bind(source, guest_path);
     }
 
     for (const auto &entry : entries) {
@@ -46,8 +46,8 @@ class MockEnvironment : ReadonlyBinder, protected MockExecutableServer {
       if (!fs::is_regular_file(status))
         throw std::invalid_argument {"mock requires a regular file: " + entry.target.string()};
       const auto original = path_t {originals_dir} / entry.target.relative_path();
-      bind(destination, ensure_mountpoint(original, false));
-      bind(host_path(stub_path), destination);
+      bind(destination, original);
+      bind(host_path(stub_path), entry.target);
       emplace(entry.target, entry.builder(entry.target, original));
     }
   }

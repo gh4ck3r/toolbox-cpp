@@ -100,15 +100,15 @@ class ReadonlyBinder {
       throw system_error {"make bind read-only " + destination.string()};
   }
 
-  static path_t validate(const path_t &logical) {
-    const auto invalid_argument = [&logical](const std::string &msg) {
-      throw std::invalid_argument {msg + ": " + logical.native()};
+  static path_t validate(const path_t &guest_path) {
+    const auto invalid_argument = [&guest_path](const std::string &msg) {
+      throw std::invalid_argument {msg + ": " + guest_path.native()};
     };
-    if (logical.native().find('\0') != std::string::npos)
+    if (guest_path.native().find('\0') != std::string::npos)
       invalid_argument("malformed path");
-    if (std::find(logical.begin(), logical.end(), "..") != logical.end())
+    if (std::find(guest_path.begin(), guest_path.end(), "..") != guest_path.end())
       invalid_argument("parent traversal in path");
-    auto result = logical.lexically_normal();
+    auto result = guest_path.lexically_normal();
     if (result.filename().empty()) result = result.parent_path();
     if (!result.is_absolute() || result == "/")
       invalid_argument("expected an absolute non-root path");

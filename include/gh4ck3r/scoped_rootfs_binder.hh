@@ -37,16 +37,18 @@ inline unsigned long readonly_mountflags(const path_t &source) {
 
 class ReadonlyBinder {
  public:
-  using Binding = std::pair<path_t, path_t>;
+  struct Binding {
+    path_t src;
+    path_t dst;
+  };
 
   ReadonlyBinder(path_t root, std::vector<Binding> bindings) :
     root_path_ {std::move(root)}
   {
     std::sort(bindings.begin(), bindings.end(),
-              [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
+              [](const auto &lhs, const auto &rhs) { return lhs.dst < rhs.dst; });
     try {
-      for (const auto &[src, dst] : bindings)
-        bind(canonical(src), dst);
+      for (const auto &[src, dst] : bindings) bind(src, dst);
     } catch (...) {
       cleanup("rollback scoped bindings");
       throw;
@@ -61,45 +63,48 @@ class ReadonlyBinder {
   ReadonlyBinder &operator=(const ReadonlyBinder &) = delete;
 
  protected:
-  bool is_bound(const path_t &guest_path) const {
-    const auto target = host_path(guest_path);
+  void bind(const path_t &host_src, const path_t &guest_dst) {
+    const auto src = canonical(host_src);
+    const auto flags = readonly_mountflags(src);
+    const auto dst = ensure_mountpoint(guest_dst, is_directory(src));
+    if (::mount(src.c_str(), dst.c_str(), nullptr, MS_BIND, nullptr) != 0)
+      throw system_error {"bind " + src.string()};
+
+    mounts_.push_back(dst);
+
+    if (::mount(nullptr, dst.c_str(), nullptr, flags, nullptr) != 0)
+      throw system_error {"make bind read-only " + dst.string()};
+  }
+
+  bool is_bound(const path_t &dst) const {
+    const auto target = host_path(dst);
     return std::any_of(mounts_.begin(), mounts_.end(),
         [&](const path_t &mount) { return is_subpath(target, mount); });
   }
 
-  path_t host_path(const path_t &guest_path) const {
-    return root_path_ / validate(guest_path).relative_path();
+  path_t host_path(const path_t &dst) const {
+    return root_path_ / guest_path(dst).relative_path();
   }
 
-  void bind(const path_t &host_src, const path_t &guest_dst) {
-    const auto flags = readonly_mountflags(host_src);
-    const auto destination = ensure_mountpoint(guest_dst, is_directory(host_src));
-    if (::mount(host_src.c_str(), destination.c_str(), nullptr, MS_BIND, nullptr) != 0)
-      throw system_error {"bind " + host_src.string()};
-    mounts_.push_back(destination);
-    if (::mount(nullptr, destination.c_str(), nullptr, flags, nullptr) != 0)
-      throw system_error {"make bind read-only " + destination.string()};
-  }
+  static path_t guest_path(const path_t &dst) {
+    if (dst.native().find('\0') != std::string::npos)
+      throw std::invalid_argument {"malformed path: " + dst.native()};
+    if (std::find(dst.begin(), dst.end(), "..") != dst.end())
+      throw std::invalid_argument {"parent traversal in path: " + dst.native()};
 
-  static path_t validate(const path_t &guest_path) {
-    const auto invalid_argument = [&guest_path](const std::string &msg) {
-      throw std::invalid_argument {msg + ": " + guest_path.native()};
-    };
-    if (guest_path.native().find('\0') != std::string::npos)
-      invalid_argument("malformed path");
-    if (std::find(guest_path.begin(), guest_path.end(), "..") != guest_path.end())
-      invalid_argument("parent traversal in path");
-    auto result = guest_path.lexically_normal();
+    auto result = dst.lexically_normal();
     if (result.filename().empty()) result = result.parent_path();
+
     if (!result.is_absolute() || result == "/")
-      invalid_argument("expected an absolute non-root path");
+      throw std::invalid_argument {
+        "expected an absolute non-root path: " + dst.native()};
     return result;
   }
 
  private:
-  path_t ensure_mountpoint(const path_t &guest_path, bool directory) {
+  path_t ensure_mountpoint(const path_t &target, bool directory) {
     auto path = root_path_;
-    for (const auto &part : validate(guest_path).relative_path()) {
+    for (const auto &part : guest_path(target).relative_path()) {
       path /= part;
       if (is_symlink(symlink_status(path)))
         throw std::invalid_argument {"symlink in bind destination: " + path.string()};

@@ -98,18 +98,18 @@ class ScopedRootFsBuilder {
     if (!src.is_absolute() || src.native().find('\0') != std::string::npos)
       throw std::invalid_argument {"bind source must be absolute"};
     if (dst.empty()) dst = src;
-    dst = detail::MockEnvironment::validate(dst);
+    dst = detail::MockEnvironment::guest_path(dst);
 
     for (const auto &binding : binds_)
-      if (binding.second == dst)
+      if (binding.dst == dst)
         throw std::invalid_argument {"duplicate bind destination: " + dst.string()};
-    binds_.emplace_back(src, std::move(dst));
+    binds_.push_back({src, std::move(dst)});
     return *this;
   }
 
   template <template <typename> class MockType = ::testing::StrictMock>
   ScopedRootFsBuilder &mock(const path_t &path) {
-    const auto target = detail::MockEnvironment::validate(path);
+    const auto target = detail::MockEnvironment::guest_path(path);
     for (const auto &entry : mocks_)
       if (entry.target == target)
         throw std::invalid_argument {"duplicate mock target: " + target.string()};

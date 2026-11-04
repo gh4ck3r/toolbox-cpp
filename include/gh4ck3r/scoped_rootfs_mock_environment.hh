@@ -26,16 +26,16 @@ class MockEnvironment : ReadonlyBinder, protected MockExecutableServer {
     const auto executable = fs::read_symlink("/proc/self/exe");
     bind(executable, stub_path);
     for (const auto &[path, source] : runtime_files(executable)) {
-      auto guest_path = path;
-      auto destination = host_path(guest_path);
+      auto target = path;
+      auto destination = host_path(target);
       if (fs::exists(fs::symlink_status(destination))) continue;
-      if (is_bound(guest_path)) {
-        guest_path = fallback_runtime_path(path);
-        destination = host_path(guest_path);
-        if (fs::exists(fs::symlink_status(destination)) || is_bound(guest_path))
+      if (is_bound(target)) {
+        target = fallback_runtime_path(path);
+        destination = host_path(target);
+        if (fs::exists(fs::symlink_status(destination)) || is_bound(target))
           continue;
       }
-      bind(source, guest_path);
+      bind(source, target);
     }
 
     for (const auto &entry : entries) {
@@ -54,11 +54,11 @@ class MockEnvironment : ReadonlyBinder, protected MockExecutableServer {
   ~MockEnvironment() = default;
 
   MockExecutable &mock(const path_t &executable) const {
-    return MockExecutableServer::mock(validate(executable));
+    return MockExecutableServer::mock(guest_path(executable));
   }
 
-  static path_t validate(const path_t &path) {
-    const auto result = ReadonlyBinder::validate(path);
+  static path_t guest_path(const path_t &path) {
+    const auto result = ReadonlyBinder::guest_path(path);
     for (const auto &p : {ipc_dir, originals_dir}) {
       if (is_subpath(result, p))
         throw std::invalid_argument {"reserved scoped root path: " + path.native()};

@@ -2,14 +2,10 @@
 #include <array>
 #include <atomic>
 #include <exception>
-#include <filesystem>
 #include <functional>
-#include <future>
-#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -20,7 +16,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
-#include <poll.h>
 #include <unistd.h>
 #include <sys/auxv.h>
 #include <sys/socket.h>
@@ -28,6 +23,7 @@
 #include <sys/un.h>
 #include <gh4ck3r/file.hh>
 #include <gmock/gmock.h>
+#include "scoped_rootfs_binder.hh"
 
 #ifndef __GLIBC__
 #error "scoped_rootfs.hh requires glibc (.init_array argc/argv/envp and AT_EXECFN)"
@@ -35,13 +31,10 @@
 
 namespace gh4ck3r::filesystem::scoped_rootfs {
 
-namespace detail {
-class MockExecutableServer;
-} // namespace detail
-
 class MockExecutable {
-  using path_t = std::filesystem::path;
  public:
+  static constexpr int passthrough = 256;
+
   explicit MockExecutable(path_t target, path_t original) :
     target_path_ {std::move(target)}, orig_chroot_path_ {std::move(original)}
   {
@@ -53,8 +46,7 @@ class MockExecutable {
   MOCK_METHOD(int, execute, (const std::vector<std::string> &argv,
                             int stdin_fd, int stdout_fd, int stderr_fd));
   int execute_original(const std::vector<std::string> &, int, int, int) noexcept {
-    exec_original_target_ = this;
-    return 0;
+    return passthrough;
   }
   const path_t &path() const noexcept { return target_path_; }
   const path_t &original_path() const noexcept { return orig_chroot_path_; }
@@ -62,8 +54,6 @@ class MockExecutable {
  private:
   path_t target_path_;
   path_t orig_chroot_path_;
-  inline static thread_local const MockExecutable *exec_original_target_ = nullptr;
-  friend class detail::MockExecutableServer;
 };
 
 namespace detail {
@@ -101,9 +91,7 @@ class MockExecutableServer {
 
   struct Response {
     std::uint32_t magic = protocol_magic;
-    int action = 0;
     int code = transport_error;
-    char original[PATH_MAX] {};
   };
 
   static bool send_all(int fd, const void *data, std::size_t size) noexcept {
@@ -132,12 +120,10 @@ class MockExecutableServer {
 
   static bool set_timeouts(int fd) noexcept {
     const timeval timeout {timeout_seconds, 0};
-
     for (const auto optname : {SO_RCVTIMEO, SO_SNDTIMEO}) {
       if (::setsockopt(fd, SOL_SOCKET, optname, &timeout, sizeof(timeout)) != 0)
         return false;
     }
-
     return true;
   }
 
@@ -145,20 +131,14 @@ class MockExecutableServer {
   MockExecutableServer(const MockExecutableServer &) = delete;
   MockExecutableServer &operator=(const MockExecutableServer &) = delete;
 
-  ~MockExecutableServer() noexcept {
-    if (thread_.joinable()) {
-      try {
-        stop();
-      } catch (...) {
-        std::terminate();
-      }
-    }
+  ~MockExecutableServer() noexcept try {
+    stop();
+  } catch (...) {
+    std::terminate();
   }
 
  protected:
   void emplace(path_t target, std::unique_ptr<MockExecutable> executable) {
-    if (thread_.joinable() || listen_sock_)
-      throw std::logic_error {"mock IPC server already started"};
     mocks_.emplace(std::move(target), std::move(executable));
   }
 
@@ -171,57 +151,32 @@ class MockExecutableServer {
 
   void start() {
     if (mocks_.empty()) return;
-    if (thread_.joinable() || listen_sock_)
-      throw std::logic_error {"mock IPC server already started"};
 
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) system_error("create mock listener");
-    listen_sock_.emplace(fd);
-    if (::bind(fd, reinterpret_cast<const sockaddr *>(&ipc_addr), sizeof(ipc_addr)) != 0)
-      system_error("bind mock listener");
-    socket_owned_ = true;
-    if (::chmod(ipc_addr.sun_path, 0600) != 0 || ::listen(fd, 32) != 0)
-      system_error("prepare mock listener");
+    listen_sock_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (listen_sock_ < 0) throw system_error {"create mock listener"};
+    if (::bind(listen_sock_, reinterpret_cast<const sockaddr *>(&ipc_addr), sizeof(ipc_addr)) != 0)
+      throw system_error {"bind mock listener"};
+    if (::chmod(ipc_addr.sun_path, 0600) != 0 || ::listen(listen_sock_, 32) != 0)
+      throw system_error {"prepare mock listener"};
 
-    int pipe[2];
-    if (::pipe2(pipe, O_CLOEXEC | O_NONBLOCK) != 0)
-      system_error("create mock shutdown pipe");
-    stop_pipe_r_.emplace(pipe[0]);
-    stop_pipe_w_.emplace(pipe[1]);
-    std::packaged_task<void()> task {[this] { ipc_loop(); }};
-    worker_result_ = task.get_future();
-    thread_ = std::thread {std::move(task)};
+    stopping_.store(false, std::memory_order_relaxed);
+    thread_ = std::thread {&MockExecutableServer::ipc_loop, this};
   }
 
   void stop() {
     if (thread_.joinable()) {
-      const char wakeup = 1;
-      ssize_t written;
-      do {
-        written = ::write(*stop_pipe_w_, &wakeup, sizeof(wakeup));
-      } while (written < 0 && errno == EINTR);
-      if (written != sizeof(wakeup))
-        system_error("stop mock listener");
+      stopping_.store(true, std::memory_order_release);
+      ::shutdown(listen_sock_, SHUT_RDWR);
       thread_.join();
     }
-    listen_sock_.reset();
-    stop_pipe_r_.reset();
-    stop_pipe_w_.reset();
-    if (socket_owned_) {
+    if (listen_sock_ != -1) {
+      ::close(std::exchange(listen_sock_, -1));
       if (::unlink(ipc_addr.sun_path) != 0 && errno != ENOENT)
-        system_error("remove mock socket");
-      socket_owned_ = false;
+        throw system_error {"remove mock socket"};
     }
   }
 
   std::vector<std::exception_ptr> take_worker_errors() {
-    if (worker_result_.valid()) {
-      try {
-        worker_result_.get();
-      } catch (...) {
-        record_worker_error(std::current_exception());
-      }
-    }
     std::lock_guard<std::mutex> lock {worker_mutex_};
     std::vector<std::exception_ptr> errors;
     errors.swap(worker_errors_);
@@ -229,26 +184,148 @@ class MockExecutableServer {
   }
 
  private:
-  [[noreturn]]
-  static void system_error(const std::string &operation, int error = errno) {
-    throw std::system_error {error, std::system_category(), operation};
+  void record_worker_error(std::exception_ptr error) noexcept {
+    std::lock_guard<std::mutex> lock {worker_mutex_};
+    worker_errors_.push_back(std::move(error));
   }
 
+  void ipc_loop() noexcept {
+    std::vector<std::thread> clients;
+    try {
+      for (;;) {
+        const int fd = ::accept4(listen_sock_, nullptr, nullptr, SOCK_CLOEXEC);
+        if (stopping_.load(std::memory_order_acquire)) break;
+        if (fd < 0) {
+          if (errno == EINTR) continue;
+          throw system_error {"accept mock client"};
+        }
+        clients.emplace_back([this, fd]() noexcept {
+          try {
+            handle_client(fd);
+          } catch (...) {
+            record_worker_error(std::current_exception());
+          }
+          ::close(fd);
+        });
+      }
+    } catch (...) {
+      record_worker_error(std::current_exception());
+    }
+    for (auto &client : clients)
+      if (client.joinable()) client.join();
+  }
+
+  struct Request {
+    std::string command;
+    std::vector<std::string> argv;
+    std::array<int, 3> fds {-1, -1, -1};
+  };
+
+  static void close_fds(const std::array<int, 3> &fds) noexcept {
+    for (const int fd : fds)
+      if (fd != -1) ::close(fd);
+  }
+
+  static Request receive_request(int client) {
+    if (!set_timeouts(client))
+      throw system_error {"set mock IPC timeout"};
+    RequestHeader header {};
+    iovec iov {&header, sizeof(header)};
+    union {
+      char bytes[CMSG_SPACE(sizeof(int) * 3)];
+      cmsghdr alignment;
+    } control {};
+    msghdr message {
+      .msg_iov = &iov,
+      .msg_iovlen = 1,
+      .msg_control = control.bytes,
+      .msg_controllen = sizeof(control.bytes),
+    };
+    ssize_t count;
+    do {
+      count = ::recvmsg(client, &message, MSG_CMSG_CLOEXEC);
+    } while (count < 0 && errno == EINTR);
+
+    Request req;
+    if (count > 0) {
+      if (auto *cmsg = CMSG_FIRSTHDR(&message);
+          cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+        const auto n = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        std::memcpy(req.fds.data(), CMSG_DATA(cmsg), n * sizeof(int));
+      }
+    }
+    try {
+      if (count != sizeof(header) || (message.msg_flags & MSG_CTRUNC) || req.fds[2] == -1)
+        throw std::runtime_error {"invalid mock IPC descriptors"};
+      if (header.magic != protocol_magic ||
+          header.command_size == 0 || header.command_size >= PATH_MAX ||
+          header.argc == 0 || header.argc > max_arguments)
+        throw std::runtime_error {"invalid mock request header"};
+
+      req.command.resize(header.command_size);
+      if (!read_all(client, req.command.data(), req.command.size()) ||
+          req.command.front() != '/' || req.command.find('\0') != std::string::npos)
+        throw std::runtime_error {"invalid mock command path"};
+
+      std::size_t total = header.command_size;
+      for (std::uint32_t i = 0; i < header.argc; ++i) {
+        std::uint32_t length = 0;
+        if (!read_all(client, &length, sizeof(length)) ||
+            length > max_string || (total += length) > max_payload)
+          throw std::runtime_error {"invalid mock argument size"};
+        std::string argument(length, '\0');
+        if (!read_all(client, argument.data(), argument.size()) ||
+            argument.find('\0') != std::string::npos)
+          throw std::runtime_error {"invalid mock argument"};
+        req.argv.push_back(std::move(argument));
+      }
+      return req;
+    } catch (...) {
+      close_fds(req.fds);
+      throw;
+    }
+  }
+
+  void handle_client(int client) {
+    Request req;
+    try {
+      req = receive_request(client);
+      const auto found = mocks_.find(req.command);
+      if (found == mocks_.end())
+        throw std::runtime_error {"unregistered mock command: " + req.command};
+
+      auto &mock = *found->second;
+      req.argv.front() = mock.path().string();
+
+      const auto code = mock.execute(req.argv, req.fds[0], req.fds[1], req.fds[2]);
+      if (code != MockExecutable::passthrough && (code < 0 || code > 255))
+        throw std::runtime_error {"invalid mock exit status"};
+
+      Response response {
+        .magic = protocol_magic,
+        .code = code,
+      };
+      if (!send_all(client, &response, sizeof(response)))
+        throw system_error {"send mock response"};
+    } catch (...) {
+      close_fds(req.fds);
+      const Response error;
+      if (!send_all(client, &error, sizeof(error)))
+        std::fprintf(stderr, "failed to send mock error response: %s\n", std::strerror(errno));
+      throw;
+    }
+    close_fds(req.fds);
+  }
+
+  // Client-side stub hooks executed inside the child process before main().
   [[noreturn]] static void stub_error() noexcept {
     constexpr char message[] = "mock command transport failed\n";
-    const char *data = message;
-    std::size_t remaining = sizeof(message) - 1;
-    while (remaining) {
-      const auto count = ::write(STDERR_FILENO, data, remaining);
-      if (count < 0 && errno == EINTR) continue;
-      if (count <= 0) break;
-      data += count;
-      remaining -= static_cast<std::size_t>(count);
-    }
+    [[maybe_unused]] const auto r = ::write(STDERR_FILENO, message, sizeof(message) - 1);
     ::_exit(transport_error);
   }
 
-  static bool mock_execution_path(char (&command)[PATH_MAX]) noexcept {
+  static bool mock_execution_path(char (&command)[PATH_MAX],
+                                  char (&original)[PATH_MAX]) noexcept {
     struct stat status {};
     if (::stat(originals_dir, &status) != 0) {
       if (errno == ENOENT || errno == ENOTDIR) return false;
@@ -257,7 +334,6 @@ class MockExecutableServer {
     if (!S_ISDIR(status.st_mode)) stub_error();
     const auto *executed = reinterpret_cast<const char *>(::getauxval(AT_EXECFN));
     if (!executed || !*executed || !::realpath(executed, command)) stub_error();
-    char original[PATH_MAX];
     const auto prefix = std::strlen(originals_dir);
     const auto size = std::strlen(command);
     if (prefix + size >= sizeof(original)) return false;
@@ -276,7 +352,8 @@ class MockExecutableServer {
   __attribute__((constructor(101)))
   static void mock_stub_entry(int argc, char **argv, char **envp) noexcept {
     char command[PATH_MAX];
-    if (!mock_execution_path(command)) return;
+    char original[PATH_MAX];
+    if (!mock_execution_path(command, original)) return;
     if (argc <= 0 || static_cast<unsigned int>(argc) > max_arguments) stub_error();
 
     const int sock = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -287,7 +364,7 @@ class MockExecutableServer {
     const auto command_size = static_cast<std::uint32_t>(std::strlen(command));
     RequestHeader header {protocol_magic, static_cast<std::uint32_t>(argc), command_size};
     iovec iov {&header, sizeof(header)};
-    union Control {
+    union {
       char bytes[CMSG_SPACE(sizeof(int) * 3)];
       cmsghdr alignment;
     } control {};
@@ -306,10 +383,8 @@ class MockExecutableServer {
     do {
       sent = ::sendmsg(sock, &message, MSG_NOSIGNAL);
     } while (sent < 0 && errno == EINTR);
-    if (sent <= 0) stub_error();
-    if (!send_all(sock, reinterpret_cast<const char *>(&header) + sent,
-                  sizeof(header) - static_cast<std::size_t>(sent))) stub_error();
-    if (!send_all(sock, command, command_size)) stub_error();
+    if (sent != sizeof(header) || !send_all(sock, command, command_size))
+      stub_error();
 
     std::size_t total = command_size;
     for (int i = 0; i < argc; ++i) {
@@ -323,188 +398,21 @@ class MockExecutableServer {
     if (!read_all(sock, &response, sizeof(response))) stub_error();
     ::close(sock);
     if (response.magic != protocol_magic) stub_error();
-    if (response.action == 1) {
-      if (!std::memchr(response.original, '\0', sizeof(response.original))) stub_error();
-      ::execve(response.original, argv, envp);
+    if (response.code == MockExecutable::passthrough) {
+      ::execve(original, argv, envp);
       stub_error();
     }
-    if (response.action != 0 || response.code < 0 || response.code > 255) stub_error();
+    if (response.code < 0 || response.code > 255) stub_error();
     ::_exit(response.code);
   }
 
-  void handle_client(unique_fd client);
-
-  struct ClientWorker {
-    std::thread thread;
-    std::atomic<bool> done {false};
-  };
-
-  void record_worker_error(std::exception_ptr error) noexcept {
-    std::lock_guard<std::mutex> lock {worker_mutex_};
-    worker_errors_.push_back(std::move(error));
-  }
-
-  void ipc_loop() {
-    std::list<ClientWorker> clients;
-    const auto reap_clients = [&](bool wait_all) noexcept {
-      for (auto it = clients.begin(); it != clients.end();) {
-        if (wait_all || it->done.load(std::memory_order_acquire)) {
-          if (it->thread.joinable()) it->thread.join();
-          it = clients.erase(it);
-        } else {
-          ++it;
-        }
-      }
-    };
-    try {
-      for (;;) {
-        reap_clients(false);
-        std::array events {
-          pollfd {*listen_sock_, POLLIN, 0},
-          pollfd {*stop_pipe_r_, POLLIN, 0},
-        };
-        const int ready = ::poll(events.data(), events.size(), -1);
-        if (ready < 0 && errno == EINTR) continue;
-        if (ready < 0) system_error("poll mock listener");
-        if (events[1].revents & POLLIN) break;
-        if (!(events[0].revents & POLLIN))
-          throw std::runtime_error {"unexpected mock listener event"};
-
-        const int fd = ::accept4(*listen_sock_, nullptr, nullptr, SOCK_CLOEXEC);
-        if (fd < 0 && errno == EINTR) continue;
-        if (fd < 0) system_error("accept mock client");
-        auto &worker = clients.emplace_back();
-        try {
-          worker.thread = std::thread {[this, &worker, client = unique_fd {fd}]() mutable noexcept {
-            try {
-              handle_client(std::move(client));
-            } catch (...) {
-              record_worker_error(std::current_exception());
-            }
-            worker.done.store(true, std::memory_order_release);
-          }};
-        } catch (...) {
-          clients.pop_back();
-          throw;
-        }
-      }
-    } catch (...) {
-      reap_clients(true);
-      record_worker_error(std::current_exception());
-      return;
-    }
-    reap_clients(true);
-  }
-
   ExecutableMap mocks_;
-  std::optional<unique_fd> listen_sock_;
-  std::optional<unique_fd> stop_pipe_r_;
-  std::optional<unique_fd> stop_pipe_w_;
+  int listen_sock_ = -1;
+  std::atomic_bool stopping_ {false};
   std::thread thread_;
-  std::future<void> worker_result_;
   std::mutex worker_mutex_;
   std::vector<std::exception_ptr> worker_errors_;
-  bool socket_owned_ = false;
 };
-
-inline void MockExecutableServer::handle_client(unique_fd client)
-try {
-  if (!set_timeouts(client))
-    system_error("set mock IPC timeout");
-  RequestHeader header {};
-  iovec iov {&header, sizeof(header)};
-  union Control {
-    char bytes[CMSG_SPACE(sizeof(int) * 3)];
-    cmsghdr alignment;
-  } control {};
-  msghdr message {};
-  message.msg_iov = &iov;
-  message.msg_iovlen = 1;
-  message.msg_control = control.bytes;
-  message.msg_controllen = sizeof(control.bytes);
-  ssize_t count;
-  do {
-    count = ::recvmsg(client, &message, MSG_CMSG_CLOEXEC);
-  } while (count < 0 && errno == EINTR);
-  struct PassedFds {
-    std::array<int, 3> descriptors {{-1, -1, -1}};
-    ~PassedFds() {
-      for (const auto fd : descriptors) if (fd >= 0) ::close(fd);
-    }
-  } passed;
-  std::size_t descriptor_count = 0;
-  if (count > 0) {
-    for (auto *cmsg = CMSG_FIRSTHDR(&message); cmsg;
-          cmsg = CMSG_NXTHDR(&message, cmsg)) {
-      if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
-      if (cmsg->cmsg_len < CMSG_LEN(0))
-        throw std::runtime_error {"invalid mock descriptor header"};
-      const auto size = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-      const auto *fds = reinterpret_cast<const int *>(CMSG_DATA(cmsg));
-      for (std::size_t i = 0; i < size; ++i) {
-        if (descriptor_count < passed.descriptors.size())
-          passed.descriptors[descriptor_count++] = fds[i];
-        else {
-          ::close(fds[i]);
-          message.msg_flags |= MSG_CTRUNC;
-        }
-      }
-    }
-  }
-  if (count <= 0 || (message.msg_flags & MSG_CTRUNC) ||
-      descriptor_count != passed.descriptors.size())
-    throw std::runtime_error {"invalid mock IPC descriptors"};
-  if (!read_all(client, reinterpret_cast<char *>(&header) + count,
-          sizeof(header) - static_cast<std::size_t>(count)))
-    throw std::runtime_error {"incomplete mock request header"};
-  if (header.magic != protocol_magic ||
-      header.command_size == 0 || header.command_size >= PATH_MAX || header.argc == 0 ||
-      header.argc > max_arguments)
-    throw std::runtime_error {"invalid mock request header"};
-  std::string command(header.command_size, '\0');
-  if (!read_all(client, command.data(), command.size()) ||
-      command.front() != '/' || command.find('\0') != std::string::npos)
-    throw std::runtime_error {"invalid mock command path"};
-  const auto found = mocks_.find(command);
-  if (found == mocks_.end())
-    throw std::runtime_error {"unregistered mock command: " + command};
-  std::vector<std::string> argv;
-  std::size_t total = header.command_size;
-  for (std::uint32_t i = 0; i < header.argc; ++i) {
-    std::uint32_t length = 0;
-    if (!read_all(client, &length, sizeof(length)) ||
-        length > max_string ||
-        (total += length) > max_payload)
-      throw std::runtime_error {"invalid mock argument size"};
-    std::string argument(length, '\0');
-    if (!read_all(client, argument.data(), argument.size()) ||
-        argument.find('\0') != std::string::npos)
-      throw std::runtime_error {"invalid mock argument"};
-    argv.push_back(std::move(argument));
-  }
-  auto &mock = *found->second;
-  argv.front() = mock.path().string();
-  MockExecutable::exec_original_target_ = nullptr;
-  Response response;
-  response.code = mock.execute(argv, passed.descriptors[0],
-                                passed.descriptors[1], passed.descriptors[2]);
-  if (MockExecutable::exec_original_target_ == &mock && response.code == 0) {
-    const auto original = mock.original_path().string();
-    if (original.size() >= sizeof(response.original))
-      throw std::runtime_error {"mock executable path is too long"};
-    response.action = 1;
-    std::memcpy(response.original, original.c_str(), original.size() + 1);
-  } else if (response.code < 0 || response.code > 255) {
-    throw std::runtime_error {"invalid mock exit status"};
-  }
-  if (!send_all(client, &response, sizeof(response)))
-    system_error("send mock response");
-} catch (...) {
-  const Response error;
-  if (!send_all(client, &error, sizeof(error)))
-    std::fprintf(stderr, "failed to send mock error response: %s\n", std::strerror(errno));
-  throw;
-}
 
 } // namespace detail
 } // namespace gh4ck3r::filesystem::scoped_rootfs

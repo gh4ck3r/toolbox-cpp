@@ -528,6 +528,11 @@ TEST_F(ScopedExecutableMockTest, UnregisteredExecutableDoesNotBecomeAMock) {
 }
 
 TEST_F(ScopedExecutableMockTest, MalformedClientIsReportedWithoutLosingRestoration) {
+  // A request header sent without SCM_RIGHTS descriptors.
+  const std::array<std::uint32_t, 3> header {0, 1, 1};
+  // Wire format of the response: { uint32_t magic; int code; }
+  struct Response { std::uint32_t magic; int code; };
+  const timeval timeout {10, 0};
   EXPECT_NONFATAL_FAILURE({
     auto scope = ScopedRootFsBuilder {root()}
       .bind(source(), "/commands").mock("/commands/agent").build();
@@ -537,12 +542,12 @@ TEST_F(ScopedExecutableMockTest, MalformedClientIsReportedWithoutLosingRestorati
     address.sun_family = AF_UNIX;
     std::strncpy(address.sun_path, "/.mock_ipc/sock", sizeof(address.sun_path) - 1);
     EXPECT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
-    using gh4ck3r::filesystem::scoped_rootfs::detail::MockExecutableServer;
-    EXPECT_TRUE(MockExecutableServer::set_timeouts(client));
-    const auto header = (MockExecutableServer::RequestHeader {MockExecutableServer::protocol_magic, 1, 1});
-    EXPECT_TRUE(MockExecutableServer::send_all(client, &header, sizeof(header)));
-    MockExecutableServer::Response response;
-    EXPECT_TRUE(MockExecutableServer::read_all(client, &response, sizeof(response)));
+    EXPECT_EQ(::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+    EXPECT_EQ(::send(client, header.data(), sizeof(header), MSG_NOSIGNAL),
+              static_cast<ssize_t>(sizeof(header)));
+    Response response {};
+    EXPECT_EQ(::recv(client, &response, sizeof(response), MSG_WAITALL),
+              static_cast<ssize_t>(sizeof(response)));
     EXPECT_EQ(response.code, 125);
   }, "invalid mock IPC descriptors");
 }

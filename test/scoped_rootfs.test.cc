@@ -488,7 +488,7 @@ TEST_F(ScopedExecutableMockTest, MissingServerFailsClosedInsteadOfRunningTestMai
   const auto result = run_command("/commands/agent");
   EXPECT_EQ(result.code, 125);
   EXPECT_TRUE(result.output.empty());
-  EXPECT_EQ(result.error, "mock command transport failed\n");
+  EXPECT_EQ(result.error, "failed to connect to the IPC server\n");
 }
 
 TEST_F(ScopedExecutableMockTest, CallbackExceptionIsReportedAfterFilesystemRestoration) {

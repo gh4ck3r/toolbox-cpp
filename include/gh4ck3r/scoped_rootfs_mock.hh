@@ -22,6 +22,7 @@
 #include <sys/auxv.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <gh4ck3r/file.hh>
 #include <gmock/gmock.h>
@@ -78,22 +79,27 @@ inline bool transfer_all(char *bytes, std::size_t size, Op &&op) noexcept {
   return true;
 }
 
+template <auto FN, typename...ARGS>
+inline bool transfer(int fd, void *bytes, size_t len, ARGS&&...args)
+{
+  auto p = reinterpret_cast<char*>(bytes);
+  while (len) {
+    const auto cnt = FN(fd, p, len, std::forward<ARGS>(args)...);
+    if (cnt < 0 && errno == EINTR) continue;
+    if (cnt <= 0) return false;
+
+    p += cnt;
+    len -= cnt;
+  }
+  return true;
+}
+
 inline bool send_all(int fd, const void *data, std::size_t size) noexcept {
-  return transfer_all(
-    const_cast<char *>(static_cast<const char *>(data)),
-    size,
-    [fd](const char *buf, std::size_t len) {
-      return ::send(fd, buf, len, MSG_NOSIGNAL);
-    });
+  return transfer<::send>(fd, const_cast<void*>(data), size, MSG_NOSIGNAL);
 }
 
 inline bool read_all(int fd, void *data, std::size_t size) noexcept {
-  return transfer_all(
-    static_cast<char *>(data),
-    size,
-    [fd](char *buf, std::size_t len) {
-      return ::read(fd, buf, len);
-    });
+  return transfer<::read>(fd, data, size);
 }
 
 inline bool set_timeouts(int fd) noexcept {
@@ -114,10 +120,14 @@ namespace detail::mock_stub {
 using namespace mock_ipc;
 
 [[noreturn]]
-inline void fail() noexcept {
-  constexpr std::string_view message {"mock command transport failed\n"};
+inline void fail(const std::string_view &msg) noexcept {
+  const std::array<iovec, 2> data {{
+    {const_cast<char*>(msg.data()), msg.size()},
+    {const_cast<char*>("\n"), 1},
+  }};
+
   [[maybe_unused]]
-  const auto r = ::write(STDERR_FILENO, message.data(), message.size());
+  auto r = ::writev(STDERR_FILENO, data.data(), data.size());
   ::_exit(transport_error);
 }
 
@@ -125,23 +135,28 @@ inline bool resolve_paths(auto &command, auto &original) noexcept {
   struct stat status {};
   if (::stat(originals_dir, &status) != 0) {
     if (errno == ENOENT || errno == ENOTDIR) return false;
-    fail();
+    fail("Mock originals directory not found");
   }
-  if (!S_ISDIR(status.st_mode)) fail();
+  if (!S_ISDIR(status.st_mode)) fail("Mock originals directory is not a directory");
 
-  const auto *executed = reinterpret_cast<const char *>(::getauxval(AT_EXECFN));
-  if (!executed || !*executed || !::realpath(executed, command)) fail();
+  if (auto executed = reinterpret_cast<const char *>(::getauxval(AT_EXECFN));
+      (!executed || !*executed || !::realpath(executed, command)))
+    fail("Mock original executable not identified");
 
-  const auto prefix = std::strlen(originals_dir);
-  const auto size = std::strlen(command);
-  if (prefix + size >= sizeof(original)) return false;
-  std::memcpy(original, originals_dir, prefix);
-  std::memcpy(original + prefix, command, size + 1);
+  if (const auto n = std::snprintf(original,
+                                   sizeof(original),
+                                   "%s%s",
+                                   originals_dir,
+                                   command);
+      n < 0 || static_cast<ssize_t>(sizeof(original)) <= n)
+    return false;
+
   if (::lstat(original, &status) != 0) {
     if (errno == ENOENT || errno == ENOTDIR) return false;
-    fail();
+    fail("Mock original executable not found");
   }
-  if (!S_ISREG(status.st_mode)) fail();
+  if (!S_ISREG(status.st_mode))
+    fail("Mock original executable found but not a regular file");
   return true;
 }
 
@@ -151,25 +166,34 @@ inline void pre_main(int argc, char **argv, char **envp) noexcept {
   char command[PATH_MAX];
   char original[PATH_MAX];
   if (!resolve_paths(command, original)) return;
-  if (argc <= 0 || static_cast<unsigned int>(argc) > max_arguments) fail();
+  if (argc <= 0 || static_cast<unsigned int>(argc) > max_arguments)
+    fail("invalid argc");
 
   const int sock = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (sock < 0 || !set_timeouts(sock)) fail();
-  if (::connect(sock, reinterpret_cast<const sockaddr *>(&ipc_addr),
-                sizeof(ipc_addr)) != 0) fail();
+  if (sock < 0 || !set_timeouts(sock))
+    fail("failed to set timeout for the protocol");
+  if (::connect(sock,
+                reinterpret_cast<const sockaddr *>(&ipc_addr),
+                sizeof(ipc_addr)) != 0)
+    fail("failed to connect to the IPC server");
 
-  const auto command_size = static_cast<std::uint32_t>(std::strlen(command));
-  RequestHeader header {protocol_magic, static_cast<std::uint32_t>(argc), command_size};
+  const auto command_size = static_cast<uint32_t>(std::strlen(command));
+  RequestHeader header {
+    .magic = protocol_magic,
+    .argc = static_cast<uint32_t>(argc),
+    .command_size = command_size
+  };
   iovec iov {&header, sizeof(header)};
   union {
     char bytes[CMSG_SPACE(sizeof(int) * 3)];
     cmsghdr alignment;
   } control {};
-  msghdr message {};
-  message.msg_iov = &iov;
-  message.msg_iovlen = 1;
-  message.msg_control = control.bytes;
-  message.msg_controllen = sizeof(control.bytes);
+  msghdr message {
+    .msg_iov = &iov,
+    .msg_iovlen = 1,
+    .msg_control = control.bytes,
+    .msg_controllen = sizeof(control.bytes),
+  };
   auto *cmsg = CMSG_FIRSTHDR(&message);
   cmsg->cmsg_level = SOL_SOCKET;
   cmsg->cmsg_type = SCM_RIGHTS;
@@ -181,25 +205,30 @@ inline void pre_main(int argc, char **argv, char **envp) noexcept {
     sent = ::sendmsg(sock, &message, MSG_NOSIGNAL);
   } while (sent < 0 && errno == EINTR);
   if (sent != sizeof(header) || !send_all(sock, command, command_size))
-    fail();
+    fail("failed to send file descriptors to the IPC server");
 
   std::size_t total = command_size;
   for (int i = 0; i < argc; ++i) {
     const auto size = ::strnlen(argv[i], max_string + 1);
-    if (size > max_string || (total += size) > max_payload) fail();
+    if (size > max_string || (total += size) > max_payload)
+      fail("arguments are too long");
     const auto length = static_cast<std::uint32_t>(size);
     if (!send_all(sock, &length, sizeof(length)) ||
-        !send_all(sock, argv[i], length)) fail();
+        !send_all(sock, argv[i], length))
+      fail("failed to send message to the IPC server");
   }
   Response response;
-  if (!read_all(sock, &response, sizeof(response))) fail();
+  if (!read_all(sock, &response, sizeof(response)))
+    fail("failed to get response from the IPC server");
   ::close(sock);
-  if (response.magic != protocol_magic) fail();
+  if (response.magic != protocol_magic)
+    fail("malformed message from the IPC server");
   if (response.code == passthrough) {
     ::execve(original, argv, envp);
-    fail();
+    fail("failed to execute original executable");
   }
-  if (response.code < 0 || response.code > 255) fail();
+  if (response.code < 0 || response.code > 255)
+    fail("invalid response code from the IPC server");
   ::_exit(response.code);
 }
 

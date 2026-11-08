@@ -40,9 +40,7 @@ namespace gh4ck3r::filesystem::scoped_rootfs {
 // no std::string/std::filesystem::path, no heap allocation, no exceptions.
 namespace detail::mock_ipc {
 
-inline constexpr const char *ipc_dir = "/.mock_ipc";
-inline constexpr const char *stub_path = "/.mock_ipc/stub";
-inline constexpr const char *originals_dir = "/.mock_orig";
+inline constexpr const std::string_view originals_dir {"/.mock_orig"};
 inline constexpr sockaddr_un ipc_addr {
   .sun_family = AF_UNIX,
   .sun_path = "/.mock_ipc/sock",
@@ -67,20 +65,14 @@ struct Response {
   int code = transport_error;
 };
 
-template <typename Op>
-inline bool transfer_all(char *bytes, std::size_t size, Op &&op) noexcept {
-  while (size) {
-    const auto count = op(bytes, size);
-    if (count < 0 && errno == EINTR) continue;
-    if (count <= 0) return false;
-    bytes += count;
-    size -= static_cast<std::size_t>(count);
-  }
-  return true;
-}
+struct StdStream {
+  int stdin;
+  int stdout;
+  int stderr;
+};
 
 template <auto FN, typename...ARGS>
-inline bool transfer(int fd, void *bytes, size_t len, ARGS&&...args)
+inline bool transfer(int fd, void *bytes, size_t len, ARGS&&...args) noexcept
 {
   auto p = reinterpret_cast<char*>(bytes);
   while (len) {
@@ -111,13 +103,35 @@ inline bool set_timeouts(int fd) noexcept {
   return true;
 }
 
-} // namespace detail::mock_ipc
+template <typename T>
+class CMSG {
+  alignas(cmsghdr) std::byte buffer[CMSG_SPACE(sizeof(T))];
+ public:
+  CMSG() { std::memset(buffer, 0, sizeof(buffer)); }
+  explicit CMSG(const T& data) : CMSG {} {
+    auto hdr = reinterpret_cast<cmsghdr*>(buffer);
+    hdr->cmsg_len = CMSG_LEN(sizeof(T));
+    hdr->cmsg_level = SOL_SOCKET;
+    hdr->cmsg_type = SCM_RIGHTS;
 
-// Client side executed inside the mocked child process before main().
-// The same constraints as detail::mock_ipc apply.
-namespace detail::mock_stub {
+    std::memcpy(CMSG_DATA(hdr), &data, sizeof(T));
+  }
 
-using namespace mock_ipc;
+  operator void*() { return buffer; }
+  size_t size() const { return sizeof(buffer); }
+};
+
+template <typename Payload, typename ControlData>
+struct MsgHdr : msghdr {
+  iovec iov;
+  MsgHdr(const Payload &payload, CMSG<ControlData> &control) : msghdr {} {
+    iov = {const_cast<Payload*>(&payload), sizeof(Payload)};
+    msg_iov = &iov;
+    msg_iovlen = 1;
+    msg_control = control;
+    msg_controllen = control.size();
+  };
+};
 
 [[noreturn]]
 inline void fail(const std::string_view &msg) noexcept {
@@ -131,9 +145,28 @@ inline void fail(const std::string_view &msg) noexcept {
   ::_exit(transport_error);
 }
 
+inline int connect() {
+  const int sock = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (sock < 0 || !set_timeouts(sock))
+    fail("failed to set timeout for the protocol");
+  if (::connect(sock,
+                reinterpret_cast<const sockaddr *>(&ipc_addr),
+                sizeof(ipc_addr)) != 0)
+    fail("failed to connect to the IPC server");
+  return sock;
+}
+
+} // namespace detail::mock_ipc
+
+// Client side executed inside the mocked child process before main().
+// The same constraints as detail::mock_ipc apply.
+namespace detail::mock_stub {
+
+using namespace mock_ipc;
+
 inline bool resolve_paths(auto &command, auto &original) noexcept {
   struct stat status {};
-  if (::stat(originals_dir, &status) != 0) {
+  if (::stat(originals_dir.data(), &status) != 0) {
     if (errno == ENOENT || errno == ENOTDIR) return false;
     fail("Mock originals directory not found");
   }
@@ -146,7 +179,7 @@ inline bool resolve_paths(auto &command, auto &original) noexcept {
   if (const auto n = std::snprintf(original,
                                    sizeof(original),
                                    "%s%s",
-                                   originals_dir,
+                                   originals_dir.data(),
                                    command);
       n < 0 || static_cast<ssize_t>(sizeof(original)) <= n)
     return false;
@@ -160,6 +193,34 @@ inline bool resolve_paths(auto &command, auto &original) noexcept {
   return true;
 }
 
+inline void send_request(int sock, std::string_view command, int argc, char **argv) {
+  const RequestHeader header {
+    .magic = protocol_magic,
+    .argc = static_cast<uint32_t>(argc),
+    .command_size = static_cast<uint32_t>(command.size()),
+  };
+
+  CMSG<StdStream> fds {{STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO}};
+  MsgHdr msg {header, fds};
+
+  if (::sendmsg(sock, &msg, MSG_NOSIGNAL) != sizeof(header))
+    fail("to send file descriptors to the IPC server");
+
+  if (!send_all(sock, command.data(), command.size()))
+    fail("to send command command to the IPC server");
+
+  size_t total = command.size();
+  for (auto i = 0; i < argc; ++i) {
+    const auto size = ::strnlen(argv[i], max_string + 1);
+    if (size > max_string || (total += size) > max_payload)
+      fail("arguments exceed maximum payload");
+
+    const auto len = static_cast<uint32_t>(size);
+    if (!send_all(sock, &len, sizeof(len)) || !send_all(sock, argv[i], len))
+      fail("failed to send message to the IPC server");
+  }
+}
+
 // Registration is identified by the execution path, not argv[0] or socket state.
 __attribute__((constructor(101)))
 inline void pre_main(int argc, char **argv, char **envp) noexcept {
@@ -169,60 +230,17 @@ inline void pre_main(int argc, char **argv, char **envp) noexcept {
   if (argc <= 0 || static_cast<unsigned int>(argc) > max_arguments)
     fail("invalid argc");
 
-  const int sock = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (sock < 0 || !set_timeouts(sock))
-    fail("failed to set timeout for the protocol");
-  if (::connect(sock,
-                reinterpret_cast<const sockaddr *>(&ipc_addr),
-                sizeof(ipc_addr)) != 0)
-    fail("failed to connect to the IPC server");
+  const int sock = connect();
 
-  const auto command_size = static_cast<uint32_t>(std::strlen(command));
-  RequestHeader header {
-    .magic = protocol_magic,
-    .argc = static_cast<uint32_t>(argc),
-    .command_size = command_size
-  };
-  iovec iov {&header, sizeof(header)};
-  union {
-    char bytes[CMSG_SPACE(sizeof(int) * 3)];
-    cmsghdr alignment;
-  } control {};
-  msghdr message {
-    .msg_iov = &iov,
-    .msg_iovlen = 1,
-    .msg_control = control.bytes,
-    .msg_controllen = sizeof(control.bytes),
-  };
-  auto *cmsg = CMSG_FIRSTHDR(&message);
-  cmsg->cmsg_level = SOL_SOCKET;
-  cmsg->cmsg_type = SCM_RIGHTS;
-  cmsg->cmsg_len = CMSG_LEN(sizeof(int) * 3);
-  const int descriptors[] {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO};
-  std::memcpy(CMSG_DATA(cmsg), descriptors, sizeof(descriptors));
-  ssize_t sent;
-  do {
-    sent = ::sendmsg(sock, &message, MSG_NOSIGNAL);
-  } while (sent < 0 && errno == EINTR);
-  if (sent != sizeof(header) || !send_all(sock, command, command_size))
-    fail("failed to send file descriptors to the IPC server");
+  send_request(sock, command, argc, argv);
 
-  std::size_t total = command_size;
-  for (int i = 0; i < argc; ++i) {
-    const auto size = ::strnlen(argv[i], max_string + 1);
-    if (size > max_string || (total += size) > max_payload)
-      fail("arguments are too long");
-    const auto length = static_cast<std::uint32_t>(size);
-    if (!send_all(sock, &length, sizeof(length)) ||
-        !send_all(sock, argv[i], length))
-      fail("failed to send message to the IPC server");
-  }
   Response response;
   if (!read_all(sock, &response, sizeof(response)))
-    fail("failed to get response from the IPC server");
+    fail("failed to receive response from server");
   ::close(sock);
+
   if (response.magic != protocol_magic)
-    fail("malformed message from the IPC server");
+    fail("invalid response magic from the IPC server");
   if (response.code == passthrough) {
     ::execve(original, argv, envp);
     fail("failed to execute original executable");
@@ -281,9 +299,9 @@ class MockExecutableServer {
     mock_builder_t builder;
   };
 
-  static constexpr const char *ipc_dir = mock_ipc::ipc_dir;
-  static constexpr const char *stub_path = mock_ipc::stub_path;
-  static constexpr const char *originals_dir = mock_ipc::originals_dir;
+  static inline const path_t ipc_dir {"/.mock_ipc"};
+  static inline const path_t stub_path {"/.mock_ipc/stub"};
+  static inline const path_t originals_dir { mock_ipc::originals_dir };
 
   void emplace(path_t target, std::unique_ptr<MockExecutable> executable) {
     mocks_.emplace(std::move(target), std::move(executable));
@@ -382,15 +400,12 @@ class MockExecutableServer {
       throw system_error {"set mock IPC timeout"};
     RequestHeader header {};
     iovec iov {&header, sizeof(header)};
-    union {
-      char bytes[CMSG_SPACE(sizeof(int) * 3)];
-      cmsghdr alignment;
-    } control {};
+    CMSG<StdStream> cmsg {};
     msghdr message {
       .msg_iov = &iov,
       .msg_iovlen = 1,
-      .msg_control = control.bytes,
-      .msg_controllen = sizeof(control.bytes),
+      .msg_control = cmsg,
+      .msg_controllen = cmsg.size(),
     };
     ssize_t count;
     do {

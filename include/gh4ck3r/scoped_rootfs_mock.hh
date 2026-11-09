@@ -4,6 +4,7 @@
 #include <chrono>
 #include <exception>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -66,10 +67,17 @@ struct Response {
 };
 
 struct StdStream {
-  int stdin;
-  int stdout;
-  int stderr;
+  int stdin  { -1 };
+  int stdout { -1 };
+  int stderr { -1 };
+
+ private:
+  friend inline void close(const StdStream &fds) noexcept {
+    for (const int fd : {fds.stdin, fds.stdout, fds.stderr})
+      if (fd != -1) ::close(fd);
+  }
 };
+
 
 template <auto FN, typename...ARGS>
 inline bool transfer(int fd, void *bytes, size_t len, ARGS&&...args) noexcept
@@ -106,16 +114,21 @@ inline bool set_timeouts(int fd) noexcept {
 template <typename T>
 class CMSG {
   alignas(cmsghdr) std::byte buffer[CMSG_SPACE(sizeof(T))];
+  cmsghdr &hdr() { return *reinterpret_cast<cmsghdr*>(buffer); }
+  const cmsghdr &hdr() const { return *reinterpret_cast<const cmsghdr*>(buffer); }
  public:
   CMSG() { std::memset(buffer, 0, sizeof(buffer)); }
   explicit CMSG(const T& data) : CMSG {} {
-    auto hdr = reinterpret_cast<cmsghdr*>(buffer);
-    hdr->cmsg_len = CMSG_LEN(sizeof(T));
-    hdr->cmsg_level = SOL_SOCKET;
-    hdr->cmsg_type = SCM_RIGHTS;
+    hdr().cmsg_len = CMSG_LEN(sizeof(T));
+    hdr().cmsg_level = SOL_SOCKET;
+    hdr().cmsg_type = SCM_RIGHTS;
 
-    std::memcpy(CMSG_DATA(hdr), &data, sizeof(T));
+    std::memcpy(CMSG_DATA(&hdr()), &data, sizeof(T));
   }
+  auto level() const { return hdr().cmsg_level; }
+  auto type() const { return hdr().cmsg_type; }
+  T& data() { return *reinterpret_cast<T*>(CMSG_DATA(&hdr())); }
+  const T& data() const { return *reinterpret_cast<const T*>(CMSG_DATA(&hdr())); }
 
   operator void*() { return buffer; }
   size_t size() const { return sizeof(buffer); }
@@ -156,6 +169,34 @@ inline int connect() {
   return sock;
 }
 
+inline void send_request(int sock, std::string_view command, int argc, char **argv) {
+  const RequestHeader header {
+    .magic = protocol_magic,
+    .argc = static_cast<uint32_t>(argc),
+    .command_size = static_cast<uint32_t>(command.size()),
+  };
+
+  CMSG<StdStream> fds {{STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO}};
+  MsgHdr msg {header, fds};
+
+  if (::sendmsg(sock, &msg, MSG_NOSIGNAL) != sizeof(header))
+    fail("failed to send file descriptors to the IPC server");
+
+  if (!send_all(sock, command.data(), command.size()))
+    fail("failed to send command to the IPC server");
+
+  size_t total = command.size();
+  for (auto i = 0; i < argc; ++i) {
+    const auto size = ::strnlen(argv[i], max_string + 1);
+    if (size > max_string || (total += size) > max_payload)
+      fail("arguments exceed maximum payload");
+
+    const auto len = static_cast<uint32_t>(size);
+    if (!send_all(sock, &len, sizeof(len)) || !send_all(sock, argv[i], len))
+      fail("failed to send message to the IPC server");
+  }
+}
+
 } // namespace detail::mock_ipc
 
 // Client side executed inside the mocked child process before main().
@@ -191,34 +232,6 @@ inline bool resolve_paths(auto &command, auto &original) noexcept {
   if (!S_ISREG(status.st_mode))
     fail("Mock original executable found but not a regular file");
   return true;
-}
-
-inline void send_request(int sock, std::string_view command, int argc, char **argv) {
-  const RequestHeader header {
-    .magic = protocol_magic,
-    .argc = static_cast<uint32_t>(argc),
-    .command_size = static_cast<uint32_t>(command.size()),
-  };
-
-  CMSG<StdStream> fds {{STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO}};
-  MsgHdr msg {header, fds};
-
-  if (::sendmsg(sock, &msg, MSG_NOSIGNAL) != sizeof(header))
-    fail("to send file descriptors to the IPC server");
-
-  if (!send_all(sock, command.data(), command.size()))
-    fail("to send command command to the IPC server");
-
-  size_t total = command.size();
-  for (auto i = 0; i < argc; ++i) {
-    const auto size = ::strnlen(argv[i], max_string + 1);
-    if (size > max_string || (total += size) > max_payload)
-      fail("arguments exceed maximum payload");
-
-    const auto len = static_cast<uint32_t>(size);
-    if (!send_all(sock, &len, sizeof(len)) || !send_all(sock, argv[i], len))
-      fail("failed to send message to the IPC server");
-  }
 }
 
 // Registration is identified by the execution path, not argv[0] or socket state.
@@ -355,7 +368,12 @@ class MockExecutableServer {
   struct Request {
     std::string command;
     std::vector<std::string> argv;
-    std::array<int, 3> fds {-1, -1, -1};
+    mock_ipc::StdStream fds {-1, -1, -1};
+  };
+
+  struct ClientWorker {
+    std::thread thread;
+    std::atomic<bool> done {false};
   };
 
   void record_worker_error(std::exception_ptr error) noexcept {
@@ -364,64 +382,73 @@ class MockExecutableServer {
   }
 
   void ipc_loop() noexcept {
-    std::vector<std::thread> clients;
+    std::list<ClientWorker> clients;
+
+    auto reap = [&clients](bool wait_all) {
+      for (auto it = clients.begin(); it != clients.end();) {
+        if (wait_all || it->done.load(std::memory_order_acquire)) {
+          if (it->thread.joinable()) it->thread.join();
+          it = clients.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    };
+
     try {
       for (;;) {
+        reap(false);
+
         const int fd = ::accept4(listen_sock_, nullptr, nullptr, SOCK_CLOEXEC);
         if (stopping_.load(std::memory_order_acquire)) break;
         if (fd < 0) {
           if (errno == EINTR) continue;
           throw system_error {"accept mock client"};
         }
-        clients.emplace_back([this, fd]() noexcept {
+
+        auto &worker = clients.emplace_back();
+        worker.thread = std::thread([this, fd, &worker]() noexcept {
           try {
             handle_client(fd);
           } catch (...) {
             record_worker_error(std::current_exception());
           }
           ::close(fd);
+          worker.done.store(true, std::memory_order_release);
         });
       }
     } catch (...) {
       record_worker_error(std::current_exception());
     }
-    for (auto &client : clients)
-      if (client.joinable()) client.join();
-  }
 
-  static void close_fds(const std::array<int, 3> &fds) noexcept {
-    for (const int fd : fds)
-      if (fd != -1) ::close(fd);
+    reap(true);
   }
 
   static Request receive_request(int client) {
     using namespace mock_ipc;
     if (!set_timeouts(client))
       throw system_error {"set mock IPC timeout"};
+
     RequestHeader header {};
-    iovec iov {&header, sizeof(header)};
-    CMSG<StdStream> cmsg {};
-    msghdr message {
-      .msg_iov = &iov,
-      .msg_iovlen = 1,
-      .msg_control = cmsg,
-      .msg_controllen = cmsg.size(),
-    };
+    CMSG<StdStream> fds {};
+    MsgHdr msg {header, fds};
+
     ssize_t count;
     do {
-      count = ::recvmsg(client, &message, MSG_CMSG_CLOEXEC);
+      count = ::recvmsg(client, &msg, MSG_CMSG_CLOEXEC);
     } while (count < 0 && errno == EINTR);
 
     Request req;
-    if (count > 0) {
-      if (auto *cmsg = CMSG_FIRSTHDR(&message);
-          cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-        const auto n = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-        std::memcpy(req.fds.data(), CMSG_DATA(cmsg), n * sizeof(int));
-      }
+    if (count > 0 &&
+        CMSG_FIRSTHDR(&msg) == fds &&
+        fds.level() == SOL_SOCKET &&
+        fds.type() == SCM_RIGHTS)
+    {
+      req.fds = fds.data();
     }
+
     try {
-      if (count != sizeof(header) || (message.msg_flags & MSG_CTRUNC) || req.fds[2] == -1)
+      if (count != sizeof(header) || (msg.msg_flags & MSG_CTRUNC) || req.fds.stderr == -1)
         throw std::runtime_error {"invalid mock IPC descriptors"};
       if (header.magic != protocol_magic ||
           header.command_size == 0 || header.command_size >= PATH_MAX ||
@@ -433,9 +460,10 @@ class MockExecutableServer {
           req.command.front() != '/' || req.command.find('\0') != std::string::npos)
         throw std::runtime_error {"invalid mock command path"};
 
-      std::size_t total = header.command_size;
-      for (std::uint32_t i = 0; i < header.argc; ++i) {
-        std::uint32_t length = 0;
+      req.argv.reserve(header.argc);
+      size_t total = header.command_size;
+      for (uint32_t i = 0; i < header.argc; ++i) {
+        uint32_t length = 0;
         if (!read_all(client, &length, sizeof(length)) ||
             length > max_string || (total += length) > max_payload)
           throw std::runtime_error {"invalid mock argument size"};
@@ -447,7 +475,7 @@ class MockExecutableServer {
       }
       return req;
     } catch (...) {
-      close_fds(req.fds);
+      close(req.fds);
       throw;
     }
   }
@@ -465,7 +493,10 @@ class MockExecutableServer {
       auto &mock = *found->second;
       req.argv.front() = mock.path().string();
 
-      const auto code = mock.execute(req.argv, req.fds[0], req.fds[1], req.fds[2]);
+      const auto code = mock.execute(req.argv,
+                                     req.fds.stdin,
+                                     req.fds.stdout,
+                                     req.fds.stderr);
       if (code != MockExecutable::passthrough && (code < 0 || code > 255))
         throw std::runtime_error {"invalid mock exit status"};
 
@@ -476,13 +507,13 @@ class MockExecutableServer {
       if (!send_all(client, &response, sizeof(response)))
         throw system_error {"send mock response"};
     } catch (...) {
-      close_fds(req.fds);
+      close(req.fds);
       const Response error;
       if (!send_all(client, &error, sizeof(error)))
         std::fprintf(stderr, "failed to send mock error response: %s\n", std::strerror(errno));
       throw;
     }
-    close_fds(req.fds);
+    close(req.fds);
   }
 
   ExecutableMap mocks_;
